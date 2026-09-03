@@ -1,0 +1,28 @@
+[project]
+name = "ioncube-re"
+version = "1.0.0"
+description = "Offline ionCube Loader 15.5.0 research toolchain: decrypt, stream, wire, lift (Python port of the frozen PHP oracles)"
+readme = "README.md"
+requires-python = ">=3.12"
+# z3-solver and capstone are declared per the project spec: they back the
+# research lineage (the M6 z3 wire-mask solve, the loader disassembly work).
+# The shipped deterministic ports run on the stdlib alone and never import
+# them; the declarations keep the research environment reproducible.
+dependencies = ["z3-solver", "capstone"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[project.scripts]
+ioncube-re = "ioncube_re.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ioncube_re"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: full-corpus sweep tests (minutes)"]

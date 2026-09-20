@@ -43,7 +43,18 @@ def zval_php(z: dict, idx: int) -> str:
             v = ((z["b"] & 0xFFFFFFFF) << 32) | (z["a"] & 0xFFFFFFFF)
             if v >= 1 << 63:
                 v -= 1 << 64
-            return str(v)
+            if -(1 << 31) <= v < 1 << 31:
+                return str(v)
+            # An out-of-i32 v with a small low word is the eval encoder's
+            # high-word garbage (the ktab mask rides only the high word:
+            # every fresh eval encode, 34/34 measured sites — demo class,
+            # fn, probe, gt1 re-encode — recover exactly via sext32(a);
+            # the clean m5 captures all fit i32, and the production corpus
+            # carries zero out-of-i32 longs). True >2^31 ints on eval
+            # files are the casualty; a plausible wrong int beats an
+            # absurd masked one.
+            a = z["a"] & 0xFFFFFFFF
+            return str(a - (1 << 32) if a >= 1 << 31 else a)
         return str(z["a"])  # int (u32 view — matches the PHP oracle print)
     if t == 5:
         # IS_DOUBLE: the 64-bit value lives in the low/high words

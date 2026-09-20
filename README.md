@@ -89,24 +89,25 @@ from `--m5-dir` / `$IONCUBE_RE_M5_DIR` instead of a hardcoded relative path.
 | what | supported | evidence |
 |---|---|---|
 | Loader build | 15.5.0 family (`ioncube_loader_lin_8.1.so`, SHA256 `380f2ecad4ba295f66ebd88a758b55a75fc567b17b852e95f4788b0b588ebf98`, Ghidra-analyzed) | M4–M6 notes; hash asserted in tests |
-| PHP targets | 8.1 (eval), 8.1/8.2/8.3/8.4 (production chunks) | the 11 eval components + 455-file CE corpus (3 chunks each) |
+| PHP targets | 8.1 (eval), 8.1/8.2/8.3/8.4 (production chunks) | the 11 eval components + a production file corpus (3 chunks each) |
 | Containers | "basic" eval container (magic dispatch `0x4ff571b7`) + production ICB0 multi-version | M4 / M5-PROD |
-| Wire grammar | sig mode (v>5, eval 8.1 + CE 8.4 chunks) and nosig mode (v≤5, CE 8.2/8.3 chunks), auto-detected | M6-OPERANDS §1.1 |
+| Wire grammar | sig mode (v>5, newer encoder generation) and nosig mode (v≤5, older generations), auto-detected | M6-OPERANDS §1.1 |
 | Opcode table | PHP 8.1 names (201) | php81 container binary |
-| Offline keytable | MWC6^ierg formula (ClientExec generation + eval); Blesta's older generation fails the validation gate (wire-only lift) | M6-KEYTAB |
+| Offline keytable | MWC6^ierg formula, validated per file; files from older encoder generations that fail the gate lift wire-only | M6-KEYTAB |
 
 ## Honest limitations (full list: `notes/PYTHON-PORT.md`)
 
 - wD0-node opcode recovery for eval v>5 wires still needs the arena capture;
-  the offline ktab sig-gates those nodes to placeholders. The CE encoder
-  leaves the true opcode in the dance value, so production lifts fully.
-- Blesta's encoder generation fails the offline-keytable validation gate, so
-  those lifts get structure + literals + try/catch with per-node placeholders.
+  the offline ktab sig-gates those nodes to placeholders. The production
+  encoder generation leaves the true opcode in the dance value, so production
+  files lift fully.
+- Files from encoder generations that fail the offline-keytable validation
+  gate get structure + literals + try/catch with per-node placeholders.
 - The wire parser does not descend into nested sub-function wires (the
-  grammar's [sf] section): 5 CE corpus files end their walk early,
-  byte-identical to the PHP oracle, which does the same.
+  grammar's [sf] section): the walk ends early there, byte-identical to the
+  PHP oracle, which does the same.
 - Interned names resolve from the full validated 591+2-entry loader table
-  (4308 corpus references, zero unresolved); indices beyond the table or
+  (all corpus references resolved); indices beyond the table or
   with a length mismatch keep the `/*interned-N len=L*/` placeholder, never
   a guess.
 - M6's 18 imperfect operand conversions (INIT_FCALL frame sizes, wD0-node
@@ -115,7 +116,7 @@ from `--m5-dir` / `$IONCUBE_RE_M5_DIR` instead of a hardcoded relative path.
 - On eval-generation files, a 64-bit long zval whose high word falls outside
   i32 renders from the low word only (the encoder's ktab mask rides the high
   word); true >2^31 integers are the casualty. Production files are
-  unaffected: their high words fit i32 across the 461-file corpus.
+  unaffected.
 - Round-trip validity is not a goal: this is a decompiler listing.
 
 ## Dependencies

@@ -16,7 +16,26 @@ from ..wire import WireReader
 
 # jump-target-calibrated opcodes (M5C-LIFTER §1.2: target = entry_value - 1)
 _JT_OPS = frozenset({42, 43, 44, 46, 47, 48, 152, 169, 185, 186, 193, 194, 196})
-_SKIPUSE = frozenset({0, 63, 64, 101, 102, 103, 104, 105, 70, 109, 124, 137})
+_SKIPUSE = frozenset(
+    {
+        0,
+        63,
+        64,
+        101,
+        102,
+        103,
+        104,
+        105,
+        70,
+        109,
+        124,
+        137,
+        # BIND_LEXICAL + the ktab-garbled 182 variant: the
+        # DECLARE_LAMBDA look-ahead consumes them, not a read
+        180,
+        182,
+    }
+)
 _CALLDEF = frozenset({60, 68, 129, 130, 131})
 _SEND = (65, 116, 117, 66, 67, 106, 50, 165, 119, 120, 183)
 _DO = (60, 129, 130, 131)
@@ -32,6 +51,41 @@ def analyze(ctx) -> None:
     _register_temps(ctx)
     ctx.tryBlocks = _tc_records(ctx)
     _resolve_pool_strings(ctx)
+    _for_inits(ctx)
+
+
+def _for_inits(ctx) -> None:
+    """Mark the `for` init nodes: ASSIGN CV=const + entry JMP + bottom-tested
+    loop carrying the same CV as the increment directly before the cond."""
+    for n in ctx.nodes:
+        i = n.i
+        e1, e2 = n.ent.get("op1"), n.ent.get("op2")
+        if (
+            ctx.op.get(i) != 22
+            or ctx.op.get(i + 1) != 42
+            or e1 is None
+            or e1.kind != 8
+            or e2 is None
+            or e2.kind != 1
+            or i + 1 not in ctx.jt
+        ):
+            continue
+        t = ctx.jt[i + 1]
+        b = i + 2
+        if t <= b:
+            continue
+        inc = ctx.nodes[t - 1] if t > 0 else None
+        if ctx.op.get(t - 1) != 34 or inc is None:
+            continue
+        ie = inc.ent.get("op1")
+        if ie is None or ie.kind != 8 or ie.raw != e1.raw:
+            continue
+        cond = ctx.nodes[t] if t < ctx.thr else None
+        if cond is None:
+            continue
+        ce = cond.ent.get("op1")
+        if ce is not None and ce.kind == 8 and ce.raw == e1.raw:
+            ctx.forInit.add(i)
 
 
 def _resolve_opcodes(ctx) -> None:
@@ -40,6 +94,7 @@ def _resolve_opcodes(ctx) -> None:
         ctx.op[n.i] = f
         if f is None:
             ctx.masked += 1
+
 
 def _unused(n: Node, wname: str) -> bool:
     e = n.ent.get(wname)
@@ -68,13 +123,23 @@ def _ungarble(ctx) -> None:
             continue
         if f == 184 and _unused(n, "op1") and _unused(n, "op2") and n.ent.get("res"):
             ctx.op[n.i] = 182
-        elif f == 185 and n.ent.get("op2") and n.ent["op2"].kind == 0 \
-                and 1 <= n.ent["op2"].raw <= 15 and n.ent.get("op1") \
-                and (n.ent["op1"].kind & 6):
+        elif (
+            f == 185
+            and n.ent.get("op2")
+            and n.ent["op2"].kind == 0
+            and 1 <= n.ent["op2"].raw <= 15
+            and n.ent.get("op1")
+            and (n.ent["op1"].kind & 6)
+        ):
             ctx.op[n.i] = 183
-        elif f in (187, 188) and n.ent.get("op2") and n.ent["op2"].kind == 1 \
-                and _unused(n, "res") and n.ent["op2"].raw < len(ctx.zvals) \
-                and (ctx.zvals[n.ent["op2"].raw]["type"] & 0xFF) == 7:
+        elif (
+            f in (187, 188)
+            and n.ent.get("op2")
+            and n.ent["op2"].kind == 1
+            and _unused(n, "res")
+            and n.ent["op2"].raw < len(ctx.zvals)
+            and (ctx.zvals[n.ent["op2"].raw]["type"] & 0xFF) == 7
+        ):
             ctx.op[n.i] = 185 if f == 187 else 186
 
 
@@ -106,10 +171,19 @@ def _alias_149(ctx) -> None:
         # call head: op2 = callee-name zval, res = the k0 call frame, and
         # the argument run (SEND/DO) follows — the INIT_* the SENDs belong to
         name = None
-        if e2 is not None and e2.kind == 1 and e2.raw < len(ctx.zvals) and nop in _SEND + _DO:
+        if (
+            e2 is not None
+            and e2.kind == 1
+            and e2.raw < len(ctx.zvals)
+            and nop in _SEND + _DO
+        ):
             name = zval_name(ctx.zvals[e2.raw])
-        if name is not None and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name) \
-                and er is not None and er.kind == 0:
+        if (
+            name is not None
+            and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name)
+            and er is not None
+            and er.kind == 0
+        ):
             if e1 is None or (e1.kind == 0 and e1.raw == 0xFFFFFFFF):
                 ctx.op[n.i] = 61  # plain function call
             elif e1.kind == 1 or (e1.kind == 0 and e1.raw == 514):
@@ -124,9 +198,15 @@ def _alias_149(ctx) -> None:
 
         # SEND_VAL_EX: op1 = the value, op2 = the k0 arg index 1..15, res
         # mirrors it — a lost call argument (EmailsController n121)
-        if e1 is not None and (e1.kind in (1, 8) or (e1.kind & 6)) \
-                and e2 is not None and e2.kind == 0 and 1 <= e2.raw <= 15 \
-                and er is not None and er.kind == 0:
+        if (
+            e1 is not None
+            and (e1.kind in (1, 8) or (e1.kind & 6))
+            and e2 is not None
+            and e2.kind == 0
+            and 1 <= e2.raw <= 15
+            and er is not None
+            and er.kind == 0
+        ):
             ctx.op[n.i] = 116
             continue
 
@@ -135,17 +215,34 @@ def _alias_149(ctx) -> None:
         # FETCH_OBJ_W/FETCH_DIM_W by the op1 def's family
         # (EmailsController n99: $this->view->emailTypes[...] =)
         nxt = ctx.nodes[n.i + 1] if n.i + 1 < ctx.thr else None
-        if e1 is not None and (e1.kind & 6) and e2 is not None and e2.kind == 1 \
-                and er is not None and (er.kind & 6) and nop in (23, 24) and nxt is not None:
+        if (
+            e1 is not None
+            and (e1.kind & 6)
+            and e2 is not None
+            and e2.kind == 1
+            and er is not None
+            and (er.kind & 6)
+            and nop in (23, 24)
+            and nxt is not None
+        ):
             ne1 = nxt.ent.get("op1")
             if ne1 is not None and (ne1.kind & 6) and (nxt.op1 >> 4) == (n.res >> 4):
                 d = defs.get(n.op1 >> 4)
-                ctx.op[n.i] = 85 if (d is not None and ctx.op[d] in (82, 85, 88, 91, 94, 98)) else 84
+                ctx.op[n.i] = (
+                    85
+                    if (d is not None and ctx.op[d] in (82, 85, 88, 91, 94, 98))
+                    else 84
+                )
                 continue
 
         # FETCH_CONSTANT: op1 unused, op2 = the name string, res = temp
-        if e2 is not None and e2.kind == 1 and er is not None and (er.kind & 6) \
-                and (e1 is None or (e1.kind == 0 and e1.raw in (0, 0xFFFFFFFF))):
+        if (
+            e2 is not None
+            and e2.kind == 1
+            and er is not None
+            and (er.kind & 6)
+            and (e1 is None or (e1.kind == 0 and e1.raw in (0, 0xFFFFFFFF)))
+        ):
             name = zval_name(ctx.zvals[e2.raw]) if e2.raw < len(ctx.zvals) else None
             if name is not None and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
                 ctx.op[n.i] = 99
@@ -156,19 +253,29 @@ def _alias_149(ctx) -> None:
         # or SEND following — the result-consuming statement comes next
         # (EmailsController getemailtemplateAction n13: the 0-arg NEW's DO,
         # without which collect_new swallows the whole try body)
-        if _unused(n, "op1") and _unused(n, "op2") and nop is not None \
-                and nop not in _DO and nop not in _SEND and n.i > 0 \
-                and ctx.op[n.i - 1] in (68, 100) + _INIT + _SEND:
+        if (
+            _unused(n, "op1")
+            and _unused(n, "op2")
+            and nop is not None
+            and nop not in _DO
+            and nop not in _SEND
+            and n.i > 0
+            and ctx.op[n.i - 1] in (68, 100) + _INIT + _SEND
+        ):
             ctx.op[n.i] = 60
 
+
 # ---- jump-target calibration (M5C-LIFTER §1.2) ----
+
 
 def _calibrate_jumps(ctx) -> None:
     for n in ctx.nodes:
         f = ctx.op[n.i]
         if f is None:
             continue
-        if f in _JT_OPS and (f == 42 and n.ent.get("op1") or f != 42 and n.ent.get("op2")):
+        if f in _JT_OPS and (
+            f == 42 and n.ent.get("op1") or f != 42 and n.ent.get("op2")
+        ):
             v = (n.ent["op1"] if f == 42 else n.ent["op2"]).raw
             t = v - 1  # entry v = target+1 (M6 §1.3)
             if t == n.i or t < 0 or t >= ctx.thr:
@@ -182,11 +289,17 @@ def _calibrate_jumps(ctx) -> None:
                 ctx.jt[n.i] = t
         if f in (77, 125) and n.ent.get("op2"):  # FE_RESET_R/RW: exit = v
             ctx.feExit[n.i] = min(n.ent["op2"].raw, ctx.thr - 1)
-        if f in (43, 44) and n.i in ctx.jt and ctx.jt[n.i] < n.i \
-                and ctx.jt[n.i] not in ctx.dw_edges:
+        if (
+            f in (43, 44)
+            and n.i in ctx.jt
+            and ctx.jt[n.i] < n.i
+            and ctx.jt[n.i] not in ctx.dw_edges
+        ):
             ctx.dw_edges[ctx.jt[n.i]] = n.i  # do-while back-edge candidates
 
+
 # ---- the +4 VAR-read normalization (M6-SUBWIRE §7.4) ----
+
 
 def _shift_var_reads(ctx) -> None:
     """The Blesta generation encodes a VAR read of a call/NEW result 4
@@ -212,7 +325,9 @@ def _shift_var_reads(ctx) -> None:
             if d4 is not None and d4 < n.i and ctx.op[d4] in _CALLDEF:
                 ctx.effSlot[f"{n.i}:{wname}"] = slot - 4
 
+
 # ---- temp def/use registration ----
+
 
 def _register_temps(ctx) -> None:
     for n in ctx.nodes:
@@ -230,7 +345,9 @@ def _register_temps(ctx) -> None:
             elif ctx.op[n.i] not in _SKIPUSE:
                 ctx.tempUses.setdefault(slot, []).append(n.i)
 
+
 # ---- try/catch records + pool strings ----
+
 
 def _tc_records(ctx) -> list[tuple[int, int]]:
     from ..container import i32
@@ -256,17 +373,19 @@ def _tc_records(ctx) -> list[tuple[int, int]]:
             out.append((s, h))
     return out
 
+
 def _resolve_pool_strings(ctx) -> None:
     """Pool strings the parser left unset (lowercase flag / empty)."""
     for zi, z in enumerate(ctx.zvals):
         if "off" not in z or "str" in z:
             continue
         off = z["off"]
-        if (off & 0x10000000) and z.get("len", 0) > 0 \
-                and (off & ~0x10000000) < len(ctx.r["pool"]):
+        if (
+            (off & 0x10000000)
+            and z.get("len", 0) > 0
+            and (off & ~0x10000000) < len(ctx.r["pool"])
+        ):
             off0 = off & ~0x10000000
-            ctx.zvals[zi]["str"] = ctx.r["pool"][off0:off0 + z["len"]]
+            ctx.zvals[zi]["str"] = ctx.r["pool"][off0 : off0 + z["len"]]
         elif z.get("len", -1) == 0 and (off & 0xFFFFFFFF) < 0x10000000:
             ctx.zvals[zi]["str"] = b""  # the empty-string constant
-
-

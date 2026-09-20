@@ -41,6 +41,48 @@ def bottom_tested_while(ctx: LiftContext, i: int, t: int, end: int) -> int | Non
         return None
     # priming: the condition region renders first — a side-effect condition
     # ($row = fetch()) emits its statement here, a pure one emits nothing
+    # ---- for-loop shape: init ASSIGN directly before the entry JMP, the
+    # increment PRE_INC on the same CV directly before the cond, and the
+    # cond reading that CV (`for ($i = 0; $i < 5; $i++)`) ----
+    initN = ctx.nodes[i - 1] if i > 0 else None
+    incN = ctx.nodes[t - 1] if t > 0 else None
+    incCV = None
+    if (
+        ctx.op.get(i - 1) == 22
+        and initN.ent.get("op1")
+        and initN.ent["op1"].kind == 8
+        and initN.ent.get("op2")
+        and initN.ent["op2"].kind == 1
+        and ctx.op.get(t - 1) == 34
+        and incN.ent.get("op1")
+        and incN.ent["op1"].kind == 8
+        and incN.ent["op1"].raw == initN.ent["op1"].raw
+    ):
+        incCV = initN.ent["op1"].raw
+    if incCV is not None:
+        # prime the condition temps first (the cmp def has not been walked
+        # at header-render time; a pure cond emits nothing here)
+        emit_region(ctx, t, j)
+        condT = unwrap(ctx.render.ch(ctx.render.ex_op1(ctx.nodes[j])))
+        initV = ctx.render.ex(initN, "op2")
+        ctx.line(ctx.nodes[i])
+        ctx.w(
+            f"for ({ctx.cv_name(incCV)} = "
+            + unwrap(ctx.render.ch(initV))
+            + f"; {condT}"
+            + f"; {ctx.cv_name(incCV)}++) {{"
+        )
+        ctx.idp += 1
+        ctx.loop_stack.append(LoopInfo(frozenset({j + 1}), frozenset({t})))
+        emit_region(ctx, b, t - 1)  # body without the trailing PRE_INC
+        ctx.loop_stack.pop()
+        ctx.idp -= 1
+        ctx.w("}")
+        ctx.emitted += 2  # the for statement + the init/inc folding
+        ctx.bk(i - 1)  # the init ASSIGN folds into the header
+        ctx.bk(t - 1)  # the trailing PRE_INC folds into the header
+        ctx.bk(j)
+        return j + 1
     ctx.line(ctx.nodes[i])
     out0 = len(ctx.out)
     emit_region(ctx, t, j)
@@ -162,8 +204,12 @@ def emit_foreach(ctx: LiftContext, i: int, end: int) -> int:
     if back is not None:
         ctx.bk(back)
     ctx.line(n)
-    ctx.w(f"foreach ({r.ch(iter_)} as "
-          + (keyName + " => " if keyName is not None else "") + r.ch(val) + ") {")
+    ctx.w(
+        f"foreach ({r.ch(iter_)} as "
+        + (keyName + " => " if keyName is not None else "")
+        + r.ch(val)
+        + ") {"
+    )
     ctx.idp += 1
     ctx.loop_stack.append(LoopInfo(frozenset({exit_, exit_ + 1}), frozenset({i + 1})))
     emit_region(ctx, bodyStart, bodyEnd)

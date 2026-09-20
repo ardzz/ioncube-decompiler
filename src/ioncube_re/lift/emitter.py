@@ -21,8 +21,11 @@ def walk_component(ctx: LiftContext) -> str:
     (E+B+M+U; the display-level drift vs thr is documented in
     HANDLERS-PORT.md §4 — no node is dropped or double-rendered in text)."""
     emit_region(ctx, 0, ctx.thr)
-    ctx.w(f"/* {ctx.thr} nodes: {ctx.emitted} emitted, {ctx.bookkept} "
-          f"bookkeeping/param, {ctx.masked} masked, {ctx.unknown} unknown */")
+    if ctx.debug:
+        ctx.w(
+            f"/* {ctx.thr} nodes: {ctx.emitted} emitted, {ctx.bookkept} "
+            f"bookkeeping/param, {ctx.masked} masked, {ctx.unknown} unknown */"
+        )
     return "".join(ctx.out)
 
 
@@ -51,8 +54,10 @@ def emit_node(ctx: LiftContext, i: int, end: int) -> int:
     op = ctx.op[i]
     if op is None:
         ctx.line(n)
-        ctx.w(f"/* n{i}: opcode masked (no arena/ktab) op1={ctx.render.opnd_text(n, 'op1')} "
-              f"op2={ctx.render.opnd_text(n, 'op2')} res={ctx.render.opnd_text(n, 'res')} */")
+        ctx.w(
+            f"/* n{i}: opcode masked (no arena/ktab) op1={ctx.render.opnd_text(n, 'op1')} "
+            f"op2={ctx.render.opnd_text(n, 'op2')} res={ctx.render.opnd_text(n, 'res')} */"
+        )
         return i + 1
     h = HANDLERS.get(op)
     if h is not None:
@@ -62,8 +67,10 @@ def emit_node(ctx: LiftContext, i: int, end: int) -> int:
 
     ctx.line(n)
     nm = OPNAMES.get(op, f"op{op}")
-    ctx.w(f"/* {nm} (opcode {op}) op1={ctx.render.opnd_text(n, 'op1')} "
-          f"op2={ctx.render.opnd_text(n, 'op2')} res={ctx.render.opnd_text(n, 'res')} */")
+    ctx.w(
+        f"/* {nm} (opcode {op}) op1={ctx.render.opnd_text(n, 'op1')} "
+        f"op2={ctx.render.opnd_text(n, 'op2')} res={ctx.render.opnd_text(n, 'res')} */"
+    )
     ctx.unknown += 1
     return i + 1
 

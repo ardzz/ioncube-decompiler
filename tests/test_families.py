@@ -23,11 +23,26 @@ def mk(nodes, zvals=None, cv=None, thr=None):
         for w in ("op1", "op2", "res"):
             if w in ent:
                 slots.setdefault(w, 0)
-        ns.append({"i": k, "trueop": op, "final": op, "ext": ext or 0,
-                   "lineno": 0, "ent": ent, **slots})
+        ns.append(
+            {
+                "i": k,
+                "trueop": op,
+                "final": op,
+                "ext": ext or 0,
+                "lineno": 0,
+                "ent": ent,
+                **slots,
+            }
+        )
     hdr = bytearray(0x60)
-    r = {"nodes": ns, "zvals": zvals, "thr": thr or len(ns),
-         "hdr": bytes(hdr), "fnrec": None, "pool": b""}
+    r = {
+        "nodes": ns,
+        "zvals": zvals,
+        "thr": thr or len(ns),
+        "hdr": bytes(hdr),
+        "fnrec": None,
+        "pool": b"",
+    }
     return LiftContext.build(b"", r, {"cv": cv or {}})
 
 
@@ -39,23 +54,33 @@ def out(ctx):
 
 
 def test_arith_binop_parens():
-    l = mk([(1, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 4, "a": 2}], cv={0: "a"})
+    l = mk(
+        [(1, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 4, "a": 2}],
+        cv={0: "a"},
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "($a + 2)"
 
 
 def test_arith_concat_no_defensive_parens():
-    l = mk([(8, {"op1": (1, 0), "op2": (8, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 6, "str": b"hi "}], cv={0: "who"})
+    l = mk(
+        [(8, {"op1": (1, 0), "op2": (8, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 6, "str": b"hi "}],
+        cv={0: "who"},
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "'hi ' . $who"
 
 
 def test_arith_unary_and_cast():
-    l = mk([(14, {"op1": (8, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
-            (51, {"op1": (8, 0), "res": (2, 0)}, {"res": 8 * 16}, 3)],
-           cv={0: "x"})
+    l = mk(
+        [
+            (14, {"op1": (8, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (51, {"op1": (8, 0), "res": (2, 0)}, {"res": 8 * 16}, 3),
+        ],
+        cv={0: "x"},
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "!($x)"
     emit_node(l, 1, l.thr)
@@ -63,16 +88,26 @@ def test_arith_unary_and_cast():
 
 
 def test_arith_type_check():
+    # TYPE_CHECK ext: small values are the plain type enum (3 = IS_LONG),
+    # larger ones the 1<<type bitmask (128 = IS_ARRAY, app_controller)
     l = mk([(123, {"op1": (8, 0), "res": (2, 0)}, {"res": 7 * 16}, 3)], cv={0: "x"})
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "is_long($x)"
+    l = mk([(123, {"op1": (8, 0), "res": (2, 0)}, {"res": 7 * 16}, 128)], cv={0: "x"})
+    emit_node(l, 0, l.thr)
+    assert l.tempExpr[7] == "is_array($x)"
 
 
 def test_arith_coalesce_instanceof_fn1():
-    l = mk([(169, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+    l = mk(
+        [
+            (169, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
             (138, {"op1": (8, 0), "op2": (1, 1), "res": (2, 0)}, {"res": 8 * 16}, 0),
-            (121, {"op1": (8, 0), "res": (2, 0)}, {"res": 9 * 16}, 0)],
-           zvals=[{"type": 1}, {"type": 6, "str": b"Exception"}], cv={0: "x"})
+            (121, {"op1": (8, 0), "res": (2, 0)}, {"res": 9 * 16}, 0),
+        ],
+        zvals=[{"type": 1}, {"type": 6, "str": b"Exception"}],
+        cv={0: "x"},
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "$x ?? null"
     emit_node(l, 1, l.thr)
@@ -82,8 +117,10 @@ def test_arith_coalesce_instanceof_fn1():
 
 
 def test_arith_qm_assign_passthrough():
-    l = mk([(31, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 6, "str": b"v"}])
+    l = mk(
+        [(31, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 6, "str": b"v"}],
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "'v'"
 
@@ -92,8 +129,11 @@ def test_arith_qm_assign_passthrough():
 
 
 def test_assign_statement_and_res_temp():
-    l = mk([(22, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 4, "a": 5}], cv={0: "x"})
+    l = mk(
+        [(22, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 4, "a": 5}],
+        cv={0: "x"},
+    )
     emit_node(l, 0, l.thr)
     assert "$x = 5;" in out(l)
     assert l.tempExpr[7] == "5"
@@ -110,38 +150,57 @@ def test_incdec_forms():
 def test_fetch_r_superglobal_vs_globals():
     # interned-name zval resolves _GET -> bare $_GET; other names -> $GLOBALS
     from ioncube_re.lift.operand import zval_name
+
     zv = {"type": 6, "str": b"_GET"}
-    l = mk([(80, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
-            (80, {"op1": (1, 1), "res": (2, 0)}, {"res": 8 * 16}, 0)],
-           zvals=[zv, {"type": 6, "str": b"registry"}])
+    l = mk(
+        [
+            (80, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (80, {"op1": (1, 1), "res": (2, 0)}, {"res": 8 * 16}, 0),
+        ],
+        zvals=[zv, {"type": 6, "str": b"registry"}],
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "$_GET"
     emit_node(l, 1, l.thr)
-    assert l.tempExpr[8] == "$GLOBALS['registry']"  # symbol-table key: quoted (ic_lift parity)
+    assert (
+        l.tempExpr[8] == "$GLOBALS['registry']"
+    )  # symbol-table key: quoted (ic_lift parity)
 
 
 def test_fetch_constant_bare_reference():
-    l = mk([(99, {"op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 6, "str": b"Blesta\\App\\Models\\DS"}])
+    l = mk(
+        [(99, {"op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 6, "str": b"Blesta\\App\\Models\\DS"}],
+    )
     emit_node(l, 0, l.thr)
-    assert l.tempExpr[7] == "\\Blesta\\App\\Models\\DS"
+    # the ns-qualified name falls back to the global constant at runtime —
+    # the corpus defines are all global, so the last segment renders
+    assert l.tempExpr[7] == "DS"
 
 
 def test_rope_interpolation_chain():
-    l = mk([
-        (54, {"op2": (1, 0)}, {}, 0),                 # ROPE_INIT 'a'
-        (55, {"op2": (8, 0)}, {}, 0),                 # ROPE_ADD $v
-        (56, {"op2": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),  # ROPE_END 'b'
-    ], zvals=[{"type": 6, "str": b"a"}, {"type": 6, "str": b"b"}], cv={0: "v"})
+    l = mk(
+        [
+            (54, {"op2": (1, 0)}, {}, 0),  # ROPE_INIT 'a'
+            (55, {"op2": (8, 0)}, {}, 0),  # ROPE_ADD $v
+            (56, {"op2": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),  # ROPE_END 'b'
+        ],
+        zvals=[{"type": 6, "str": b"a"}, {"type": 6, "str": b"b"}],
+        cv={0: "v"},
+    )
     for k in range(l.thr):
         emit_node(l, k, l.thr)
     assert l.tempExpr[7] == "'a' . $v . 'b'"
 
 
 def test_isset_empty_families():
-    l = mk([(114, {"op1": (8, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
-            (114, {"op1": (8, 1), "res": (2, 0)}, {"res": 8 * 16}, 2)],
-           cv={0: "x", 1: "y"})
+    l = mk(
+        [
+            (114, {"op1": (8, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (114, {"op1": (8, 1), "res": (2, 0)}, {"res": 8 * 16}, 2),
+        ],
+        cv={0: "x", 1: "y"},
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "isset($x)"
     emit_node(l, 1, l.thr)
@@ -149,8 +208,10 @@ def test_isset_empty_families():
 
 
 def test_unset_var_and_bind_global():
-    l = mk([(74, {"op1": (8, 0)}, {}, 0), (168, {"op2": (8, 1)}, {}, 0)],
-           cv={0: "x", 1: "g"})
+    l = mk(
+        [(74, {"op1": (8, 0)}, {}, 0), (168, {"op2": (8, 1)}, {}, 0)],
+        cv={0: "x", 1: "g"},
+    )
     emit_node(l, 0, l.thr)
     emit_node(l, 1, l.thr)
     t = out(l)
@@ -161,23 +222,32 @@ def test_unset_var_and_bind_global():
 
 
 def test_fetch_obj_this_receiver():
-    l = mk([(82, {"op1": (0, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 6, "str": b"name"}])
+    l = mk(
+        [(82, {"op1": (0, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 6, "str": b"name"}],
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "$this->name"
 
 
 def test_fetch_dim():
-    l = mk([(81, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 4, "a": 3}], cv={0: "row"})
+    l = mk(
+        [(81, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 4, "a": 3}],
+        cv={0: "row"},
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "$row[3]"
 
 
 def test_pre_inc_obj_and_isset_prop():
-    l = mk([(132, {"op1": (0, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
-            (148, {"op1": (0, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 8 * 16}, 2)],
-           zvals=[{"type": 6, "str": b"count"}])
+    l = mk(
+        [
+            (132, {"op1": (0, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (148, {"op1": (0, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 8 * 16}, 2),
+        ],
+        zvals=[{"type": 6, "str": b"count"}],
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "++$this->count"
     emit_node(l, 1, l.thr)
@@ -188,12 +258,19 @@ def test_pre_inc_obj_and_isset_prop():
 
 
 def test_echo_throw_exit_include():
-    l = mk([(136, {"op1": (1, 0)}, {}, 0),
+    l = mk(
+        [
+            (136, {"op1": (1, 0)}, {}, 0),
             (108, {"op1": (1, 1)}, {}, 0),
             (79, {"op1": (1, 0)}, {}, 0),
-            (73, {"op1": (1, 2)}, {}, 8)],
-           zvals=[{"type": 4, "a": 1}, {"type": 6, "str": b"Ex"},
-                  {"type": 6, "str": b"lib.php"}])
+            (73, {"op1": (1, 2)}, {}, 8),
+        ],
+        zvals=[
+            {"type": 4, "a": 1},
+            {"type": 6, "str": b"Ex"},
+            {"type": 6, "str": b"lib.php"},
+        ],
+    )
     for k in range(l.thr):
         emit_node(l, k, l.thr)
     t = out(l)
@@ -214,8 +291,10 @@ def test_bookkeeping_set_counts_once():
 
 
 def test_declare_comment_form():
-    l = mk([(144, {"op1": (1, 0), "op2": (1, 1)}, {}, 0)],
-           zvals=[{"type": 6, "str": b"m"}, {"type": 6, "str": b"p"}])
+    l = mk(
+        [(144, {"op1": (1, 0), "op2": (1, 1)}, {}, 0)],
+        zvals=[{"type": 6, "str": b"m"}, {"type": 6, "str": b"p"}],
+    )
     emit_node(l, 0, l.thr)
     assert "/* DECLARE_CLASS op1=string('m') op2=string('p') */" in out(l)
 
@@ -231,20 +310,20 @@ def test_every_family_module_is_registered():
     assert handlers.arrays and handlers.calls and handlers.control and handlers.misc
     # one entry per opcode, no overlaps (the decorator enforces it); spot
     # the family boundaries
-    for op in (1, 8, 31, 51, 123, 169):        # arithmetic
+    for op in (1, 8, 31, 51, 123, 169):  # arithmetic
         assert op in HANDLERS
     for op in (22, 25, 26, 54, 74, 80, 99, 114, 168):  # variables
         assert op in HANDLERS
     for op in (76, 81, 82, 97, 132, 148, 182):  # objects
         assert op in (HANDLERS)
-    for op in (72, 147, 187):                    # arrays
+    for op in (72, 147, 187):  # arrays
         assert op in HANDLERS
-    for op in (59, 68, 71, 100, 183):            # calls
+    for op in (59, 68, 71, 100, 183):  # calls
         assert op in HANDLERS
-    for op in (42, 43, 48, 62, 77, 152, 185):    # control
+    for op in (42, 43, 48, 62, 77, 152, 185):  # control
         assert op in HANDLERS
-    for op in (136, 141, 57, 58, 142, 181):      # misc
+    for op in (136, 141, 57, 58, 142, 181):  # misc
         assert op in HANDLERS
     # the unknown fallback stays: no handlers for these
-    for op in (193, 196, 50, 66):
+    for op in (196, 198, 200, 202):
         assert op not in HANDLERS

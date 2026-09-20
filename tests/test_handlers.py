@@ -36,11 +36,26 @@ def mk(nodes, zvals=None, cv=None, thr=None):
         for w in ("op1", "op2", "res"):
             if w in ent:
                 slots.setdefault(w, 0)  # ex() reads the raw slot value
-        ns.append({"i": k, "trueop": op, "final": op, "ext": ext or 0,
-                   "lineno": 0, "ent": ent, **slots})
+        ns.append(
+            {
+                "i": k,
+                "trueop": op,
+                "final": op,
+                "ext": ext or 0,
+                "lineno": 0,
+                "ent": ent,
+                **slots,
+            }
+        )
     hdr = bytearray(0x60)
-    r = {"nodes": ns, "zvals": zvals, "thr": thr or len(ns),
-         "hdr": bytes(hdr), "fnrec": None, "pool": b""}
+    r = {
+        "nodes": ns,
+        "zvals": zvals,
+        "thr": thr or len(ns),
+        "hdr": bytes(hdr),
+        "fnrec": None,
+        "pool": b"",
+    }
     return LiftContext.build(b"", r, {"cv": cv or {}})
 
 
@@ -55,8 +70,12 @@ def test_ungarble_fetch_this():
 
 
 def test_ungarble_send_func_arg():
-    l = mk([(59, {"op2": (1, 0)}, {}, 0),
-            (185, {"op1": (2, 0), "op2": (0, 3)}, {"op1": 6 * 16}, 0)])
+    l = mk(
+        [
+            (59, {"op2": (1, 0)}, {}, 0),
+            (185, {"op1": (2, 0), "op2": (0, 3)}, {"op1": 6 * 16}, 0),
+        ]
+    )
     l.zvals.append({"type": 6, "str": b"foo"})
     l.r["zvals"] = l.zvals
     assert l.op[1] == 183  # SWITCH_LONG(arg-index op2) -> SEND_FUNC_ARG
@@ -67,12 +86,18 @@ def test_ungarble_send_func_arg():
 def test_ungarble_switch_header_pair():
     zv = {"type": 7, "str": b"[1:1i24;4;4294967295;"}  # serialized jumptable
     # IN_ARRAY(187) with res unused + const jumptable op2 -> SWITCH_LONG(185)
-    l = mk([(187, {"op1": (8, 0), "op2": (1, 0), "res": UNUSED}, {}, 0)],
-           zvals=[zv], cv={0: "x"})
+    l = mk(
+        [(187, {"op1": (8, 0), "op2": (1, 0), "res": UNUSED}, {}, 0)],
+        zvals=[zv],
+        cv={0: "x"},
+    )
     assert l.op[0] == 185
     # COUNT(188) same shape -> SWITCH_STRING(186)
-    l2 = mk([(188, {"op1": (8, 0), "op2": (1, 0), "res": UNUSED}, {}, 0)],
-            zvals=[zv], cv={0: "x"})
+    l2 = mk(
+        [(188, {"op1": (8, 0), "op2": (1, 0), "res": UNUSED}, {}, 0)],
+        zvals=[zv],
+        cv={0: "x"},
+    )
     assert l2.op[0] == 186
     # a real count() keeps its op: res temp, op2 unused
     l3 = mk([(188, {"op1": (8, 0), "res": (2, 0)}, {"res": 8 * 16}, 0)], cv={0: "x"})
@@ -87,13 +112,24 @@ def test_ungarble_switch_header_pair():
 def test_add_array_element_extends_live_literal():
     # INIT_ARRAY builds 'a' => 1 into T7; a construct starter interrupts;
     # the registry handler extends the same res slot
-    l = mk([
-        (71, {"op1": (1, 0), "op2": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),
-        (82, {"op1": (0, 0), "op2": (1, 2), "res": (2, 0)}, {"res": 9 * 16}, 0),
-        (72, {"op1": (2, 0), "op2": (1, 3), "res": (2, 0)},
-         {"op1": 9 * 16, "res": 7 * 16}, 0),
-    ], zvals=[{"type": 4, "a": 1}, {"type": 6, "str": b"a"},
-              {"type": 6, "str": b"b"}, {"type": 6, "str": b"k"}])
+    l = mk(
+        [
+            (71, {"op1": (1, 0), "op2": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (82, {"op1": (0, 0), "op2": (1, 2), "res": (2, 0)}, {"res": 9 * 16}, 0),
+            (
+                72,
+                {"op1": (2, 0), "op2": (1, 3), "res": (2, 0)},
+                {"op1": 9 * 16, "res": 7 * 16},
+                0,
+            ),
+        ],
+        zvals=[
+            {"type": 4, "a": 1},
+            {"type": 6, "str": b"a"},
+            {"type": 6, "str": b"b"},
+            {"type": 6, "str": b"k"},
+        ],
+    )
     emit_node(l, 0, l.thr)  # collectArray: the whole run incl. the interrupter
     assert l.tempExpr[7] == "['a' => 1, 'k' => $this->b]"
 
@@ -102,12 +138,15 @@ def test_add_array_element_registry_continuation():
     # a construct starter (nested INIT_FCALL) ENDS collectArray's run; the
     # AAE after the call lands at statement level and extends the literal
     # via the registry handler (handlers.py ADD_ARRAY_ELEMENT)
-    l = mk([
-        (71, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
-        (59, {"op2": (1, 1)}, {}, 0),
-        (60, {"res": (2, 0)}, {"res": 9 * 16}, 0),
-        (72, {"op1": (2, 0), "res": (2, 0)}, {"op1": 9 * 16, "res": 7 * 16}, 0),
-    ], zvals=[{"type": 6, "str": b"first"}, {"type": 6, "str": b"foo"}])
+    l = mk(
+        [
+            (71, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (59, {"op2": (1, 1)}, {}, 0),
+            (60, {"res": (2, 0)}, {"res": 9 * 16}, 0),
+            (72, {"op1": (2, 0), "res": (2, 0)}, {"op1": 9 * 16, "res": 7 * 16}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"first"}, {"type": 6, "str": b"foo"}],
+    )
     emit_node(l, 0, l.thr)  # collectArray stops at the INIT (construct starter)
     emit_node(l, 1, l.thr)  # the nested call -> tempExpr[9] = 'foo()'
     emit_node(l, 3, l.thr)  # the registry continuation
@@ -116,8 +155,10 @@ def test_add_array_element_registry_continuation():
 
 
 def test_add_array_element_without_live_temp_starts_one():
-    l = mk([(72, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 6, "str": b"v"}])
+    l = mk(
+        [(72, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 6, "str": b"v"}],
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "['v']"
 
@@ -126,11 +167,14 @@ def test_add_array_element_without_live_temp_starts_one():
 
 
 def test_silence_wraps_newest_temp():
-    l = mk([
-        (57, {"res": (2, 0)}, {"res": 6 * 16}, 0),
-        (31, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),  # QM_ASSIGN
-        (58, {"op1": (2, 0)}, {"op1": 6 * 16}, 0),
-    ], zvals=[{"type": 6, "str": b"expr"}])
+    l = mk(
+        [
+            (57, {"res": (2, 0)}, {"res": 6 * 16}, 0),
+            (31, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),  # QM_ASSIGN
+            (58, {"op1": (2, 0)}, {"op1": 6 * 16}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"expr"}],
+    )
     emit_node(l, 0, l.thr)
     emit_node(l, 1, l.thr)
     emit_node(l, 2, l.thr)
@@ -138,11 +182,14 @@ def test_silence_wraps_newest_temp():
 
 
 def test_silence_leaves_pre_window_temp_alone():
-    l = mk([
-        (31, {"op1": (1, 0), "res": (2, 0)}, {"res": 5 * 16}, 0),
-        (57, {"res": (2, 0)}, {"res": 6 * 16}, 0),
-        (58, {"op1": (2, 0)}, {"op1": 6 * 16}, 0),
-    ], zvals=[{"type": 6, "str": b"before"}])
+    l = mk(
+        [
+            (31, {"op1": (1, 0), "res": (2, 0)}, {"res": 5 * 16}, 0),
+            (57, {"res": (2, 0)}, {"res": 6 * 16}, 0),
+            (58, {"op1": (2, 0)}, {"op1": 6 * 16}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"before"}],
+    )
     for k in range(l.thr):
         emit_node(l, k, l.thr)
     assert l.tempExpr[5] == "'before'"  # produced before the window: not wrapped
@@ -152,15 +199,19 @@ def test_silence_leaves_pre_window_temp_alone():
 
 
 def test_defined():
-    l = mk([(122, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 6, "str": b"APP_PATH"}])
+    l = mk(
+        [(122, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 6, "str": b"APP_PATH"}],
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "defined('APP_PATH')"
 
 
 def test_in_array_real_call():
-    l = mk([(187, {"op1": (8, 0), "op2": (8, 1), "res": (2, 0)},
-             {"res": 7 * 16}, 0)], cv={0: "needle", 1: "hay"})
+    l = mk(
+        [(187, {"op1": (8, 0), "op2": (8, 1), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        cv={0: "needle", 1: "hay"},
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "in_array($needle, $hay)"
 
@@ -178,8 +229,10 @@ def test_bind_static():
 
 
 def test_make_ref_passthrough():
-    l = mk([(140, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-           zvals=[{"type": 6, "str": b"$x"}])
+    l = mk(
+        [(140, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 6, "str": b"$x"}],
+    )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "'$x'"
 
@@ -188,42 +241,56 @@ def test_make_ref_passthrough():
 
 
 def test_assign_dim_op_compound():
-    l = mk([
-        (27, {"op1": (8, 0), "op2": (1, 1)}, {}, 1),
-        (137, {"op1": (1, 2)}, {}, 0),  # OP_DATA carries the value
-    ], zvals=[{"type": 4, "a": 5}, {"type": 4, "a": 2}, {"type": 6, "str": b"x"}],
-       cv={0: "out"})
+    l = mk(
+        [
+            (27, {"op1": (8, 0), "op2": (1, 1)}, {}, 1),
+            (137, {"op1": (1, 2)}, {}, 0),  # OP_DATA carries the value
+        ],
+        zvals=[{"type": 4, "a": 5}, {"type": 4, "a": 2}, {"type": 6, "str": b"x"}],
+        cv={0: "out"},
+    )
     emit_node(l, 0, l.thr)
     assert "$out[2] += 'x';" in "".join(l.out)
 
 
 def test_assign_obj_op_compound():
-    l = mk([
-        (28, {"op1": (0, 0), "op2": (1, 0)}, {}, 8),
-        (137, {"op1": (1, 1)}, {}, 0),
-    ], zvals=[{"type": 6, "str": b"count"}, {"type": 4, "a": 1}])
+    l = mk(
+        [
+            (28, {"op1": (0, 0), "op2": (1, 0)}, {}, 8),
+            (137, {"op1": (1, 1)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"count"}, {"type": 4, "a": 1}],
+    )
     emit_node(l, 0, l.thr)
     assert "$this->count .= 1;" in "".join(l.out)
 
 
 def test_unset_obj_chain_through_fetch_obj_unset():
     # FETCH_OBJ_UNSET stages $this->session; UNSET_OBJ chains onto it
-    l = mk([
-        (97, {"op1": (0, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
-        (76, {"op1": (2, 0), "op2": (1, 1)}, {"op1": 7 * 16}, 0),
-    ], zvals=[{"type": 6, "str": b"session"}, {"type": 6, "str": b"installing"}])
+    l = mk(
+        [
+            (97, {"op1": (0, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (76, {"op1": (2, 0), "op2": (1, 1)}, {"op1": 7 * 16}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"session"}, {"type": 6, "str": b"installing"}],
+    )
     emit_node(l, 0, l.thr)
     emit_node(l, 1, l.thr)
     assert "unset($this->session->installing);" in "".join(l.out)
 
 
 def test_assign_static_prop_with_op_data():
-    l = mk([
-        (25, {"op1": (1, 0), "op2": (0, 513)}, {}, 0),
-        (137, {"op1": (1, 1)}, {}, 0),
-    ], zvals=[{"type": 6, "str": b"lang"}, {"type": 4, "a": 2}])
+    l = mk(
+        [
+            (25, {"op1": (1, 0), "op2": (0, 513)}, {}, 0),
+            (137, {"op1": (1, 1)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"lang"}, {"type": 4, "a": 2}],
+    )
+    l.meta["classDepth"] = True  # scoped context: the 513 self sentinel
     emit_node(l, 0, l.thr)
-    assert "self::lang = 2;" in "".join(l.out)
+    # a static property keeps the `$`
+    assert "self::$lang = 2;" in "".join(l.out)
 
 
 def test_unset_cv():
@@ -238,22 +305,28 @@ def test_unset_cv():
 def test_jt_guard_dead_code_jmp_lands_on_next_node():
     # JMP(1) entry v=2 (v-1 == self): the target is the next statement (2),
     # not v+1 (3) — v+1 only for the mid-RETURN form
-    l = mk([
-        (62, {"op1": (1, 0)}, {}, 0),
-        (42, {"op1": (0, 2)}, {}, 0),
-        (59, {"op2": (1, 0)}, {}, 0),  # INIT: the real jump target
-    ], zvals=[{"type": 1}, {"type": 6, "str": b"f"}])
+    l = mk(
+        [
+            (62, {"op1": (1, 0)}, {}, 0),
+            (42, {"op1": (0, 2)}, {}, 0),
+            (59, {"op2": (1, 0)}, {}, 0),  # INIT: the real jump target
+        ],
+        zvals=[{"type": 1}, {"type": 6, "str": b"f"}],
+    )
     assert l.jt[1] == 2
 
 
 def test_jt_guard_mid_return_form_kept():
     # JMP(0) entry v=1 (v-1 == self) with a RETURN at v+1: the validated
     # mid-RETURN form keeps the v+1 target
-    l = mk([
-        (42, {"op1": (0, 1)}, {}, 0),
-        (31, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
-        (62, {"op1": (1, 0)}, {}, 0),
-    ], zvals=[{"type": 1}, {"type": 6, "str": b"f"}])
+    l = mk(
+        [
+            (42, {"op1": (0, 1)}, {}, 0),
+            (31, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (62, {"op1": (1, 0)}, {}, 0),
+        ],
+        zvals=[{"type": 1}, {"type": 6, "str": b"f"}],
+    )
     assert l.jt[0] == 2  # the RETURN sits at v+1
 
 
@@ -268,10 +341,11 @@ def test_registry_shape():
 
 
 def test_graceful_degradation_unknown_family():
-    # an unported opcode (MATCH) still renders the structured comment
-    l = mk([(193, {"op1": (1, 0)}, {}, 0)], zvals=[{"type": 1}])
+    # an unported opcode (196 = MATCH_LONG... unused on the wire) still
+    # renders the structured comment
+    l = mk([(196, {"op1": (1, 0)}, {}, 0)], zvals=[{"type": 1}])
     emit_node(l, 0, l.thr)
-    assert "MATCH (opcode 193)" in "".join(l.out)
+    assert "opcode 196" in "".join(l.out)
     assert l.unknown == 1
 
 
@@ -315,7 +389,10 @@ def test_ce_action_func_arg_call_chain():
 
     r = lift_file(f"{CE}/library/CE/Controller/Action.php")
     t = r["text"]
-    assert "CE_Lib::trigger('System-ActionCalled', $this, ['action' => $_GET['action']]);" in t
+    assert (
+        "CE_Lib::trigger('System-ActionCalled', $this, ['action' => $_GET['action']]);"
+        in t
+    )
     assert "$this->user->getFullName()" in t
 
 
@@ -329,13 +406,19 @@ def test_ce_cwhois_families():
 
     r = lift_file(f"{CE}/library/CE/3rdparty/cWhois/cwhois.php")
     t = r["text"]
-    assert "in_array($option, ['2003', '2008'])" in t
+    assert "in_array($v, ['2003', '2008'])" in t
     assert "return $this->_ucs4_to_utf8(" in t
     assert "$input[($output - 1)] += $k;" in t or "] += " in t
-    for family in ("ADD_ARRAY_ELEMENT (opcode", "SWITCH_LONG (opcode",
-                   "SWITCH_STRING (opcode", "BEGIN_SILENCE (opcode",
-                   "END_SILENCE (opcode", "CHECK_FUNC_ARG (opcode",
-                   "HANDLE_EXCEPTION (opcode", "FETCH_OBJ_UNSET (opcode"):
+    for family in (
+        "ADD_ARRAY_ELEMENT (opcode",
+        "SWITCH_LONG (opcode",
+        "SWITCH_STRING (opcode",
+        "BEGIN_SILENCE (opcode",
+        "END_SILENCE (opcode",
+        "CHECK_FUNC_ARG (opcode",
+        "HANDLE_EXCEPTION (opcode",
+        "FETCH_OBJ_UNSET (opcode",
+    ):
         assert family not in t, family
 
 
@@ -365,9 +448,11 @@ def test_ce_corpora_unknown_budget():
     from ioncube_re.lift import lift_file
 
     total = 0
-    for path in ("library/CE/Controller/Action.php",
-                 "library/CE/3rdparty/cWhois/cwhois.php",
-                 "modules/billing/models/TaxGateway.php"):
+    for path in (
+        "library/CE/Controller/Action.php",
+        "library/CE/3rdparty/cWhois/cwhois.php",
+        "modules/billing/models/TaxGateway.php",
+    ):
         r = lift_file(f"{CE}/{path}")
         for line in r["text"].split("\n"):
             if "(opcode " in line and line.strip().startswith("/*"):

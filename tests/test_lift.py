@@ -40,18 +40,24 @@ def test_marker81_semantic_match():
     assert "return 'hi ' . $who;" in t
     assert "return ('hi ' . $who);" not in t  # no defensive CONCAT parens
     assert "echo hello('AAAA_marker_0001');" in t
-    assert "0 masked" in t  # the arena path resolved the wD0 CONCAT node
+    assert "0 masked" in lift_file(f"{WORK}/marker81.php", m5dir=M5, debug=True)["text"]
+    # clean mode: no debug comments at all
+    assert "// line" not in t and "nodes:" not in t
 
 
 @requires_workspace
 def test_marker81_without_captures_still_sig_gates():
     """--no-auto equivalent (no m5 dir): the offline ktab lifts the sig-valid
-    subset; hello's wD0 CONCAT degrades to an honest masked placeholder."""
+    subset; hello's wD0 CONCAT now recovers offline via the loader's wD0
+    variant tables (lift/wd0.py) — byte-exact with the arena path."""
     r = lift_file(f"{WORK}/marker81.php", m5dir=None)
     t = r["text"]
     assert "function hello(string $who): string {" in t
-    assert "opcode masked" in t
-    assert "op1=string('hi ')" in t
+    assert "return 'hi ' . $who;" in t
+    assert (
+        "0 masked" in lift_file(f"{WORK}/marker81.php", m5dir=None, debug=True)["text"]
+    )
+    assert "op1=string('hi ')" not in t  # the masked placeholder is gone
 
 
 @requires_workspace
@@ -123,10 +129,21 @@ _GT_CASES = [
     ("marker81.php", "gt_marker.txt", [("$_main:", "5/5"), ("hello:", "3/3")]),
     ("fresh81.php", "gt_fresh_src.txt", [("$_main:", "5/5"), ("Greeter::hi:", "3/3")]),
     ("gt_diverse1_81.php", "gt_gt_diverse1.txt", [("$_main:", "21/21")]),
-    ("gt_diverse2_81.php", "gt_gt_diverse2.txt", [("$_main:", "39/39"), ("join2:", "5/5")]),
-    ("gt_diverse3_81.php", "gt_gt_diverse3.txt",
-     [("$_main:", "14/14"), ("Animal::label:", "2/2"),
-      ("Dog::__construct:", "4/4"), ("Dog::label:", "4/4")]),
+    (
+        "gt_diverse2_81.php",
+        "gt_gt_diverse2.txt",
+        [("$_main:", "39/39"), ("join2:", "5/5")],
+    ),
+    (
+        "gt_diverse3_81.php",
+        "gt_gt_diverse3.txt",
+        [
+            ("$_main:", "14/14"),
+            ("Animal::label:", "2/2"),
+            ("Dog::__construct:", "4/4"),
+            ("Dog::label:", "4/4"),
+        ],
+    ),
 ]
 
 
@@ -138,8 +155,9 @@ def test_gt_table_via_lift(src, gtfile, expect):
     joined = "\n".join(r["gt"])
     assert "MISS" not in joined
     for sec, ok in expect:
-        assert f"gt {sec}" in joined and f"opcode match {ok} gt oplines" in joined, \
+        assert f"gt {sec}" in joined and f"opcode match {ok} gt oplines" in joined, (
             f"{src}: expected gt {sec} {ok} in:\n{joined}"
+        )
 
 
 @requires_workspace
@@ -151,10 +169,25 @@ def test_blesta_lift():
     call temps stay $Vn; PYTHON-PORT.md §4.2's remaining half.)"""
     r = lift_file(f"{WORK}/corpus/blesta/blesta/app/models/license.php")
     t = r["text"]
-    assert t.count("// ===== component:") == 17
-    assert "class Blesta\\App\\Models\\License extends Blesta\\App\\AppModel {" in t
-    for m in ("load", "setKeys", "unload", "validate", "verify",
-              "getLicenseData", "getStatistics"):
+    assert (
+        lift_file(f"{WORK}/corpus/blesta/blesta/app/models/license.php", debug=True)[
+            "text"
+        ].count("// ===== component:")
+        == 17
+    )
+    # namespaced classes cannot be declared FQ: the pipeline splits the
+    # namespace off and fully-qualifies the parent
+    assert "namespace Blesta\\App\\Models;" in t
+    assert "class License extends \\Blesta\\App\\AppModel {" in t
+    for m in (
+        "load",
+        "setKeys",
+        "unload",
+        "validate",
+        "verify",
+        "getLicenseData",
+        "getStatistics",
+    ):
         assert f"function {m}(" in t
     assert "opcode masked" not in t  # offline-ktab resolves every component
     assert "try {" in t and "catch (Throwable" in t
@@ -168,7 +201,11 @@ def test_lift_cli_exit_zero():
     assert proc.returncode == 0, proc.stderr
     text = proc.stdout.decode()
     assert "$_GET['controller'] = 'index';" in text
-    assert b"\xe2\x80\x94" in proc.stdout  # the em-dash header line (UTF-8)
+    # the em-dash header line is a --debug annotation; the clean default
+    # carries none
+    dbg = cli(["lift", "--debug", f"{CE}/cron.php"])
+    assert dbg.returncode == 0, dbg.stderr
+    assert b"\xe2\x80\x94" in dbg.stdout
 
 
 @requires_workspace
@@ -177,8 +214,9 @@ def test_superglobal_isset_ternary_repro():
     FETCH_IS of a superglobal name renders `$_REQUEST` (never a quoted
     constant / an internal-field leak), and the isset-guard ternary emits
     its branch content instead of empty if/else shells."""
-    r = lift_file(f"{CE}/modules/admin/controllers/AnnouncementsController.php",
-                  chunk=1)
+    r = lift_file(
+        f"{CE}/modules/admin/controllers/AnnouncementsController.php", chunk=1
+    )
     t = r["text"]
     assert "$limit = (isset($_REQUEST['limit']) ? $_REQUEST['limit'] : 25);" in t
     assert "$start = (isset($_REQUEST['start']) ? $_REQUEST['start'] : 0);" in t
@@ -195,9 +233,11 @@ def test_no_operand_leak_artifacts():
     render as quoted constants. Action.php was the artifact-heaviest file;
     upload.class.php carries the call-arm ternaries; masked-node diagnostic
     comments are excluded (comment-stripped text)."""
-    for f in ("library/CE/Controller/Action.php",
-              "modules/files/models/upload.class.php",
-              "modules/admin/controllers/AnnouncementsController.php"):
+    for f in (
+        "library/CE/Controller/Action.php",
+        "modules/files/models/upload.class.php",
+        "modules/admin/controllers/AnnouncementsController.php",
+    ):
         t = _strip_php_comments(lift_file(f"{CE}/{f}", chunk=1)["text"])
         assert not _ARTIFACT_RE.search(t), f
         assert not _QUOTED_SG_RE.search(t), f
@@ -221,8 +261,10 @@ def test_call_arm_ternary_corpus():
     """upload.class.php get_version_param: a call chain in the ternary arm
     folds (the arms are expression regions, calls included)."""
     t = lift_file(f"{CE}/modules/files/models/upload.class.php", chunk=1)["text"]
-    assert ("return isset($_GET['version']) ? "
-            "basename(stripslashes($_GET['version'])) : null;") in t
+    assert (
+        "return isset($_GET['version']) ? "
+        "basename(stripslashes($_GET['version'])) : null;"
+    ) in t
 
 
 @requires_workspace
@@ -230,8 +272,9 @@ def test_superglobal_empty_var_name():
     """`empty($_POST)` lowers to ISSET_ISEMPTY_VAR with op1 = the NAME zval
     (TicketController addreplyticketAction) — the name renders as the
     superglobal, and the && chain merges into one condition."""
-    t = lift_file(f"{CE}/modules/support/controllers/TicketController.php",
-                  chunk=1)["text"]
+    t = lift_file(f"{CE}/modules/support/controllers/TicketController.php", chunk=1)[
+        "text"
+    ]
     assert "empty($_POST)" in t
     assert "empty('_POST')" not in t
     assert "empty(/*interned" not in t

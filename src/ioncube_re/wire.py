@@ -77,14 +77,32 @@ class WireReader:
 
 
 HDRF = {
-    0x00: "type|arg_flags", 0x04: "fn_flags", 0x08: "fn_name_ptr", 0x0C: "scope_ptr",
-    0x10: "prototype_ptr", 0x14: "num_args", 0x18: "num_required", 0x1C: "arg_info/nodes_ptr",
-    0x20: "static_vars", 0x24: "T*8 (last_opline-ish)", 0x28: "literal_count",
-    0x2C: "->opa+0x40", 0x30: "THR (node count)", 0x34: "->opa+0x48",
-    0x44: "->opa+0x68", 0x48: "->opa+0x70", 0x4C: "live_range_count",
-    0x50: "try_catch_count", 0x54: "ptr", 0x58: "->opa+0x88",
-    0x60: "->opa+0x98", 0x64: "->opa+0x9c", 0x68: "doc_comment?",
-    0x6C: "ZVAL_RECORD_COUNT", 0x70: "SUB_FUNCTION_COUNT", 0x74: "->opa+0xb0",
+    0x00: "type|arg_flags",
+    0x04: "fn_flags",
+    0x08: "fn_name_ptr",
+    0x0C: "scope_ptr",
+    0x10: "prototype_ptr",
+    0x14: "num_args",
+    0x18: "num_required",
+    0x1C: "arg_info/nodes_ptr",
+    0x20: "static_vars",
+    0x24: "T*8 (last_opline-ish)",
+    0x28: "literal_count",
+    0x2C: "->opa+0x40",
+    0x30: "THR (node count)",
+    0x34: "->opa+0x48",
+    0x44: "->opa+0x68",
+    0x48: "->opa+0x70",
+    0x4C: "live_range_count",
+    0x50: "try_catch_count",
+    0x54: "ptr",
+    0x58: "->opa+0x88",
+    0x60: "->opa+0x98",
+    0x64: "->opa+0x9c",
+    0x68: "doc_comment?",
+    0x6C: "ZVAL_RECORD_COUNT",
+    0x70: "SUB_FUNCTION_COUNT",
+    0x74: "->opa+0xb0",
     0x78: "->opa+0xb8",
 }
 
@@ -92,8 +110,9 @@ _SEND_OPS = (0x32, 0x41, 0x42, 0x43, 0x6A, 0x74, 0x75, 0x77, 0x78, 0xA5, 0xB9)
 _JMPZ_OPS = (0x2B, 0x2C, 0x2E, 0x2F, 0x4D, 0x7D, 0x97, 0x98, 0xA9, 0xC6)
 
 
-def parse_wire(w: bytes, kt: bytes | None = None, arena: bytes | None = None,
-               xoff: int = 2) -> dict:
+def parse_wire(
+    w: bytes, kt: bytes | None = None, arena: bytes | None = None, xoff: int = 2
+) -> dict:
     """Parse + assemble one wire blob. kt enables the opcode demask; arena
     (live capture) additionally resolves wD0 nodes via the demasked handler."""
     r = WireReader(w)
@@ -114,8 +133,19 @@ def parse_wire(w: bytes, kt: bytes | None = None, arena: bytes | None = None,
     if i32(hdr, 8) != 0:
         fnrec = r.raw(16)  # function-name record
     htc = r.i32()
+    statics: list[tuple[bytes, bytes]] = []
     if htc > 0:
-        print(f"note: const-hash entries present ({htc}) — reader not modeled", file=sys.stderr)
+        # The positive count carries the static-variables table (M6 wire
+        # reader not modeled before; gfuncs/tally layout, byte-verified):
+        # per entry a key chunk + a value chunk, each [u32 ctrl][ctrl&0xFF
+        # bytes] (ctrl 0x2000000N: N = inline data length). tally:
+        # [20000005]'calls' + [20000010]'i0;4;4294967295;' = 29 B.
+        for _ in range(htc):
+            kc = r.u32()
+            key = r.raw(kc & 0xFF)
+            vc = r.u32()
+            val = r.raw(vc & 0xFF)
+            statics.append((key, val))
     tc = u32(hdr, 0x50)
     r.raw(tc << 4)
     thr = u32(hdr, 0x30)
@@ -140,7 +170,10 @@ def parse_wire(w: bytes, kt: bytes | None = None, arena: bytes | None = None,
         pre.append({"a": a, "b": b, "ctrl": zc, "zrec": zrec, "names": names})
     fi = r.i32()
     if fi > 0:
-        print(f"note: fn-info entries present ({fi}) — reader not modeled", file=sys.stderr)
+        print(
+            f"note: fn-info entries present ({fi}) — reader not modeled",
+            file=sys.stderr,
+        )
     ktcnt = r.i32()
     opcnt = r.i32()
     ops = [r.u32() for _ in range(opcnt)]
@@ -269,7 +302,12 @@ def parse_wire(w: bytes, kt: bytes | None = None, arena: bytes | None = None,
                         break
         # sig validation (sig mode only; keys at ktab[thr+3i..+3])
         sigok = None
-        if mode == "sig" and sig is not None and kt is not None and thr + 3 * i + 3 <= len(kt):
+        if (
+            mode == "sig"
+            and sig is not None
+            and kt is not None
+            and thr + 3 * i + 3 <= len(kt)
+        ):
             k0 = kt[thr + 3 * i]
             k1s = kt[thr + 3 * i + 1]
             k2s = kt[thr + 3 * i + 2]
@@ -293,18 +331,47 @@ def parse_wire(w: bytes, kt: bytes | None = None, arena: bytes | None = None,
                 op1 = (ent["op1"][1] + 1) * 0x20 - i * 0x20
             if f in _JMPZ_OPS and "op2" in ent:
                 op2 = (ent["op2"][1] + 1) * 0x20 - i * 0x20
-        nodes.append({
-            "i": i, "op": op, "raw": rawop, "sig": sig, "sigok": sigok,
-            "final": final, "trueop": trueop, "ext": ext, "lineno": lineno,
-            "ent": ent, "t1": t1, "t2": t2, "rt": rt,
-            "op1": op1, "op2": op2, "res": res,
-        })
+        nodes.append(
+            {
+                "i": i,
+                "op": op,
+                "raw": rawop,
+                "sig": sig,
+                "sigok": sigok,
+                "final": final,
+                "trueop": trueop,
+                "ext": ext,
+                "lineno": lineno,
+                "ent": ent,
+                "t1": t1,
+                "t2": t2,
+                "rt": rt,
+                "op1": op1,
+                "op2": op2,
+                "res": res,
+            }
+        )
     return {
-        "hdr": hdr, "chk": chkok, "thr": thr, "fn": fn, "fnrec": fnrec,
-        "ktcnt": ktcnt, "opcnt": opcnt, "entcnt": entcnt, "ops": ops,
-        "nodes": nodes, "pool": pool, "zvals": zv, "lits": lits, "live": live,
-        "sf": sf, "mode": mode, "pre": pre,
-        "end": r.p, "len": len(w),
+        "hdr": hdr,
+        "chk": chkok,
+        "thr": thr,
+        "fn": fn,
+        "fnrec": fnrec,
+        "ktcnt": ktcnt,
+        "opcnt": opcnt,
+        "entcnt": entcnt,
+        "ops": ops,
+        "nodes": nodes,
+        "pool": pool,
+        "zvals": zv,
+        "lits": lits,
+        "live": live,
+        "sf": sf,
+        "mode": mode,
+        "pre": pre,
+        "statics": statics,
+        "end": r.p,
+        "len": len(w),
     }
 
 
@@ -353,8 +420,10 @@ def fmt_node(n: dict, zvals: list[dict]) -> str:
         return "zval"
 
     flds = []
-    for nm, d in (("op1", (n["t1"], n["op1"], n["ent"]["op1"][1] if "op1" in n["ent"] else None)),
-                  ("op2", (n["t2"], n["op2"], n["ent"]["op2"][1] if "op2" in n["ent"] else None))):
+    for nm, d in (
+        ("op1", (n["t1"], n["op1"], n["ent"]["op1"][1] if "op1" in n["ent"] else None)),
+        ("op2", (n["t2"], n["op2"], n["ent"]["op2"][1] if "op2" in n["ent"] else None)),
+    ):
         if nm not in n["ent"]:
             continue
         z = zref(d[0], d[2])
@@ -380,9 +449,22 @@ def render_wire_report(r: dict, basename: str) -> list[str]:
     out.append(
         "== %s: %dB thr=%d fn=%08x chk=%s walk=%d/%d mode=%s ktcnt=%d opcnt=%d "
         "entcnt=%d pool=%dB zv=%d sf=%d"
-        % (basename, r["len"], r["thr"], r["fn"], "OK" if r["chk"] else "BAD",
-           r["end"], r["len"], r["mode"], r["ktcnt"], r["opcnt"], r["entcnt"],
-           len(r["pool"]), len(r["zvals"]), r["sf"])
+        % (
+            basename,
+            r["len"],
+            r["thr"],
+            r["fn"],
+            "OK" if r["chk"] else "BAD",
+            r["end"],
+            r["len"],
+            r["mode"],
+            r["ktcnt"],
+            r["opcnt"],
+            r["entcnt"],
+            len(r["pool"]),
+            len(r["zvals"]),
+            r["sf"],
+        )
     )
     for o, nm in HDRF.items():
         out.append("   +%-3x %-24s %08x" % (o, nm, u32(r["hdr"], o)))
@@ -391,7 +473,9 @@ def render_wire_report(r: dict, basename: str) -> list[str]:
         line = "   zval%-2d type=%03x a=%08x b=%08x" % (i, z["type"], z["a"], z["b"])
         if "len" in z:
             line += " off=%d len=%d%s" % (
-                z["off"], z["len"], " " + _php_addcslashes(z["str"]) if "str" in z else ""
+                z["off"],
+                z["len"],
+                " " + _php_addcslashes(z["str"]) if "str" in z else "",
             )
         out.append(line)
     sigokn = 0
@@ -434,19 +518,31 @@ def parse_stream_desc(s: bytes) -> dict | None:
                 p += 4 + ln
             else:
                 break
-    pred = 0x43 + sum(len(x) for x in strings) + 4 * len(strings) + 9 if strings else 0x4C
+    pred = (
+        0x43 + sum(len(x) for x in strings) + 4 * len(strings) + 9 if strings else 0x4C
+    )
     return {
-        "size": size, "seedA": u32(s, 8), "seedB": u32(s, 0xC), "f10": u32(s, 0x10),
-        "f48": u32(s, 0x48), "blob_off": pos, "blob_len": n - pos,
-        "tail": n - pos - size, "strings": strings, "pred": pred,
+        "size": size,
+        "seedA": u32(s, 8),
+        "seedB": u32(s, 0xC),
+        "f10": u32(s, 0x10),
+        "f48": u32(s, 0x48),
+        "blob_off": pos,
+        "blob_len": n - pos,
+        "tail": n - pos - size,
+        "strings": strings,
+        "pred": pred,
     }
 
 
 # ---------------- gt cross-check (M5 §4 rules) ----------------
 
 _EQV = {
-    "FAST_CONCAT": "CONCAT", "DO_UCALL": "DO_FCALL", "DO_FCALL_BY_NAME": "DO_FCALL",
-    "SEND_VAL": "SEND_VAL_EX", "SEND_VAR": "SEND_VAR_EX",
+    "FAST_CONCAT": "CONCAT",
+    "DO_UCALL": "DO_FCALL",
+    "DO_FCALL_BY_NAME": "DO_FCALL",
+    "SEND_VAL": "SEND_VAL_EX",
+    "SEND_VAR": "SEND_VAR_EX",
 }
 
 
@@ -514,11 +610,21 @@ def gt_check(nodes: list[dict], gtlines: list[str]) -> tuple[int, int, int, list
 # ---------------- offline keytable params ----------------
 
 
-def offline_params(seed_a=None, seed_b=None, ierg=None, x=None, seeds=None,
-                   desc_file=None, mainblob_file=None, desc=None):
+def offline_params(
+    seed_a=None,
+    seed_b=None,
+    ierg=None,
+    x=None,
+    seeds=None,
+    desc_file=None,
+    mainblob_file=None,
+    desc=None,
+):
     """Fill (seedA, seedB, ierg, x) from the offline sources (ic_wire kt_offline_params)."""
     if seed_a is None and seeds is not None:
-        m = re.match(r"^(0x[0-9a-fA-F]+|\d+)\s*,\s*(0x[0-9a-fA-F]+|\d+)$", seeds.strip())
+        m = re.match(
+            r"^(0x[0-9a-fA-F]+|\d+)\s*,\s*(0x[0-9a-fA-F]+|\d+)$", seeds.strip()
+        )
         if not m:
             raise WireError("--seeds expects 0xAABBCCDD,0x11223344")
         seed_a = int(m.group(1), 0)
@@ -537,7 +643,9 @@ def offline_params(seed_a=None, seed_b=None, ierg=None, x=None, seeds=None,
         with open(mainblob_file, "rb") as f:
             mb = f.read()
         if len(mb) < 0x20:
-            raise WireError(f"cannot read --mainblob {mainblob_file} (need >= 0x20 bytes)")
+            raise WireError(
+                f"cannot read --mainblob {mainblob_file} (need >= 0x20 bytes)"
+            )
         if ierg is None:
             ierg = u32(mb, 0x14)
         if x is None:

@@ -74,15 +74,31 @@ def scan_wires(stream: bytes, start: int) -> list[tuple[int, int, dict]]:
     return found
 
 
-def record_seeds(stream: bytes, start: int, end: int, wire_size: int) -> tuple[int, int] | None:
+def record_seeds(
+    stream: bytes, start: int, end: int, wire_size: int
+) -> tuple[int, int] | None:
     """A sub-wire record's (seedA, seedB): the u32 wire-size word followed by 8
-    seed bytes (M6-KEYTAB)."""
+    seed bytes (M6-KEYTAB).
+
+    A region can contain a coincidental u32 == wire_size (junk, inlined
+    literals, earlier wire tails), so the first match is not necessarily the
+    record. The real record carries the eval-record marker 0x01 at +0x15
+    (M6-SUBWIRE §3's [byte 01 @+0x15], byte-verified on healthy records);
+    prefer the closest match that has it, else fall back to the closest."""
+    best: tuple[int, int, int] | None = None  # (priority, -distance, i)
     i = start
     while i + 12 <= end:
         if u32(stream, i) == wire_size:
-            return (u32(stream, i + 4), u32(stream, i + 8))
+            marker = stream[i + 0x15] if i + 0x15 < len(stream) else 0
+            pri = 0 if marker == 1 else 1
+            cand = (pri, -(i - start), i)
+            if best is None or cand < best:
+                best = cand
         i += 1
-    return None
+    if best is None:
+        return None
+    i = best[2]
+    return (u32(stream, i + 4), u32(stream, i + 8))
 
 
 # ---- stream/wire string extraction ----
@@ -124,7 +140,12 @@ def tail_doccomment(s: bytes, start: int, limit: int | None = None) -> str | Non
     i = start
     while i + 4 <= end:
         ln = int.from_bytes(s[i : i + 2], "little")
-        if ln > 4 and s[i + 2 : i + 4] == b"\x00\x20" and i + 4 + ln <= end and s[i + 4 : i + 7] == b"/**":
+        if (
+            ln > 4
+            and s[i + 2 : i + 4] == b"\x00\x20"
+            and i + 4 + ln <= end
+            and s[i + 4 : i + 7] == b"/**"
+        ):
             return s[i + 4 : i + 4 + ln].decode("latin-1").rstrip()
         i += 1
     return None
@@ -142,5 +163,11 @@ def pool_strings(pool: bytes) -> list[bytes]:
     return strs
 
 
-__all__ = ["classrec_strings", "desc_strings", "pool_strings",
-           "record_seeds", "scan_wires", "tail_doccomment"]
+__all__ = [
+    "classrec_strings",
+    "desc_strings",
+    "pool_strings",
+    "record_seeds",
+    "scan_wires",
+    "tail_doccomment",
+]

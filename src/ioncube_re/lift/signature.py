@@ -11,10 +11,21 @@ from ..container import u32
 
 # ---- zend type masks (Zend/zend_type_info.h; IS_STRING = 6 -> 1<<6 = 0x40) ----
 _MAY_BE = [
-    (0x2, "null"), (0x4, "false"), (0x8, "true"), (0x10, "int"), (0x20, "float"),
-    (0x40, "string"), (0x80, "array"), (0x100, "object"), (0x200, "resource"),
-    (0x1000, "callable"), (0x2000, "iterable"), (0x4000, "void"), (0x8000, "static"),
-    (0x10000, "mixed"), (0x20000, "never"),
+    (0x2, "null"),
+    (0x4, "false"),
+    (0x8, "true"),
+    (0x10, "int"),
+    (0x20, "float"),
+    (0x40, "string"),
+    (0x80, "array"),
+    (0x100, "object"),
+    (0x200, "resource"),
+    (0x1000, "callable"),
+    (0x2000, "iterable"),
+    (0x4000, "void"),
+    (0x8000, "static"),
+    (0x10000, "mixed"),
+    (0x20000, "never"),
 ]
 _MAY_BE_ANY = 0x3FE  # null|false|true|int|float|string|array|object|resource
 
@@ -72,8 +83,13 @@ def pool_names(r: dict) -> list[str]:
     pool = r["pool"]
     namesEnd = len(pool)
     for z in r["zvals"]:
-        if "off" in z and (z["off"] & 0xFFFFFFFF) < 0x10000000 and z["off"] >= 2 \
-                and z["off"] < namesEnd and (z.get("len", 0) > 0 or "len" not in z):
+        if (
+            "off" in z
+            and (z["off"] & 0xFFFFFFFF) < 0x10000000
+            and z["off"] >= 2
+            and z["off"] < namesEnd
+            and (z.get("len", 0) > 0 or "len" not in z)
+        ):
             namesEnd = min(namesEnd, z["off"])
     strs = []
     o = 2
@@ -113,7 +129,11 @@ def arg_specs(r: dict) -> tuple[list[tuple[str, str]], str | None]:
                 ret = ty
             continue
         off, ln = p["a"]
-        nm = pool[off : off + ln].decode("latin-1") if 0 < ln < 64 and off + ln <= len(pool) else None
+        nm = (
+            pool[off : off + ln].decode("latin-1")
+            if 0 < ln < 64 and off + ln <= len(pool)
+            else None
+        )
         params.append((nm, ty))
     return params, ret
 
@@ -130,17 +150,70 @@ def arg_names(r: dict) -> list[str]:
     return out
 
 
-def cv_names(r: dict, mode: str, rec_strings: list[str]) -> dict[int, str]:
+def cv_names(
+    r: dict, mode: str, rec_strings: list[str], is_fn: bool = True
+) -> dict[int, str]:
     names: dict[int, str] = {}
     numCV = max_cv(r) + 1
     if mode == "eval":
         entries = pool_names(r)
-        numArgs = u32(r["hdr"], 0x14)
+        # the pool layout is [fnName, argNames..., cvNames...] and the
+        # header arg-count misses a trailing variadic — take the max
+        numArgs = max(u32(r["hdr"], 0x14), len(arg_names(r)))
         base = 1 + numArgs if r["fnrec"] is not None else 0
         for k in range(numCV):
             if base + k < len(entries) and re.match(
-                    r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", entries[base + k]):
+                r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", entries[base + k]
+            ):
                 names[k] = entries[base + k]
+    if not names and rec_strings:
+        cand = list(rec_strings)
+        cand.pop()  # last = fn name
+        cand = [s for s in cand if not (s[:1].isupper() and s.lower() != s)]
+        for k in range(min(numCV, len(cand))):
+            if re.match(r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", cand[k]):
+                names[k] = cand[k]
+    if mode == "prod":
+        # the production pool: docblock, then \0-separated entries — the
+        # leading run of identifier-like entries ends with the CV names
+        # (return/param type names first, CV names last; the run breaks at
+        # the first path/literal entry). The last numCV are the CV names.
+        # The pool beats rec_strings (which misorders on param-heavy fns).
+        pool = r["pool"]
+        i = pool.find(b"*/\x00")
+        if i < 0:
+            i = pool.find(b"\x00", 2)
+            if i < 0:
+                return names
+            i += 1
+        else:
+            i += 3
+        if not is_fn:
+            i = 2
+        run: list[str] = []
+        for p in pool[i:].split(b"\x00"):
+            if (
+                not p
+                or len(p) > 40
+                or not re.fullmatch(rb"[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*", p)
+            ):
+                break
+            # a high-bit lead byte prefixes the garbled names (\xd7action,
+            # \xcd_REQUEST): the real name follows it
+            if p[0] >= 0x80 and re.fullmatch(
+                rb"[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*", p[1:]
+            ):
+                p = p[1:]
+            run.append(p.decode("latin-1"))
+        if is_fn:
+            for k in range(min(numCV, len(run))):
+                nm = run[len(run) - min(numCV, len(run)) + k]
+                names[k] = nm
+        else:
+            for k in range(len(run)):
+                names[k] = run[k]
+        if names:
+            return names
     if not names and rec_strings:
         cand = list(rec_strings)
         cand.pop()  # last = fn name
@@ -151,14 +224,16 @@ def cv_names(r: dict, mode: str, rec_strings: list[str]) -> dict[int, str]:
     return names
 
 
-
 def param_list(ctx) -> list[str]:
     """Parameter list from the leading RECV nodes + the pre-record arg specs
-    (names AND types — benchmark gap #2)."""
+    (names AND types — benchmark gap #2). Promoted ctor parameters (the
+    meta['promote'] map {paramIndex: 'public readonly Suit'}) replace the
+    plain rendering at their index."""
     specs, _ = arg_specs(ctx.r)
     params = []
     arg_names_list = [nm for nm, _ in specs]
     arg_types = [ty for _, ty in specs]
+    promote = ctx.meta.get("promote") or {}
     for i in range(ctx.thr):
         op = ctx.op[i]
         if op in (63, 64, 164):
@@ -166,20 +241,37 @@ def param_list(ctx) -> list[str]:
             e = n.ent.get("res")
             idx = e.raw if e and e.kind == 8 else len(params)
             k = len(params)
-            nm = (arg_names_list[k] if k < len(arg_names_list) and arg_names_list[k]
-                  else ctx.cv.get(idx, f"arg{idx}"))
+            nm = (
+                arg_names_list[k]
+                if k < len(arg_names_list) and arg_names_list[k]
+                else ctx.cv.get(idx, f"arg{idx}")
+            )
             ty = arg_types[k] if k < len(arg_types) else ""
             if op == 64:
                 e2 = n.ent.get("op2")
                 if e2 and e2.kind == 1 and e2.raw < len(ctx.zvals):
                     from .operand import zval_php
+
                     nm += " = " + zval_php(ctx.zvals[e2.raw], e2.raw)
             prefix = "..." if op == 164 else ""
-            params.append(("" if not ty else ty + " ") + prefix + "$" + nm)
+            if k in promote:
+                # promoted: the property record's visibility/readonly/type
+                # prefix replaces the wire-derived type
+                params.append(promote[k] + " $" + nm)
+            else:
+                params.append(("" if not ty else ty + " ") + prefix + "$" + nm)
         elif op is not None and op not in (0, 124, 101):
             break  # first real statement ends the params
     return params
 
 
-__all__ = ["arg_names", "arg_specs", "cv_names", "fn_name_of", "max_cv",
-           "param_list", "pool_names", "render_type"]
+__all__ = [
+    "arg_names",
+    "arg_specs",
+    "cv_names",
+    "fn_name_of",
+    "max_cv",
+    "param_list",
+    "pool_names",
+    "render_type",
+]

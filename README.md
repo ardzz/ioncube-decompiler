@@ -16,8 +16,12 @@ executed.
 
 ### Example
 
-`demo-source.php`, compiled with the ionCube 8.1 encoder and lifted with
-`uv run ioncube-re lift demo-encoded.php`:
+The `demo/` folder ships both sides: `demo/demo-source.php` is the original
+source (note the hardcoded HMAC signing key), and `demo/demo-encoded.php` is
+that file compiled with the ionCube 8.1 evaluation encoder. Lifting the
+encoded file:
+
+    uv run ioncube-re lift demo/demo-encoded.php
 
     <?php
     $issuer = new LicenseIssuer();

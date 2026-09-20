@@ -57,3 +57,10 @@ def _check_func_arg(ctx: LiftContext, i: int, end: int) -> int:
     # inside collect_call; this is the walk-landed-anywhere fallback)
     ctx.bk(i)
     return i + 1
+
+
+@opcode_handler(199)  # VERIFY_NEVER_TYPE
+def _verify_never(ctx: LiftContext, i: int, end: int) -> int:
+    # never-type assert glue that shadows an arg spread (variadic unpack)
+    ctx.bk(i)
+    return i + 1

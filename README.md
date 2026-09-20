@@ -60,28 +60,6 @@ string data come from the wire; `$V*`/`$T*` names mark values the wire does
 not name (temporary variables), and the `/* no DO_FCALL seen */` comment flags
 a discarded call result the encoder optimized away.
 
-## The lift package (the KISS/SOLID refactor, notes/REFACTOR.md)
-
-    src/ioncube_re/lift/
-    ├── model.py        # dataclasses: Node/Operand/Component/LiftContext, the shared vocabulary
-    ├── analysis.py     # context-build passes: opcode map, +2 garble, jt calibration, +4 VAR reads
-    ├── registry.py     # HANDLERS dict + @opcode_handler: new opcode = new entry, zero core edits
-    ├── operand.py      # OperandRenderer (temps/CVs/refs → text) + the pure literal helpers
-    ├── collectors.py   # call/NEW/array-literal expression collection (the DO stopping point)
-    ├── structurer.py   # try/if/else/return/jumps + break/continue levels + ternary + goto mode
-    ├── loops.py        # while forms (priming, do-while) + foreach (key-in-temp fold)
-    ├── switches.py     # the switch family: CASE chains, jumptable headers, table fallback
-    ├── emitter.py      # the walk: emit_region/emit_node dispatch (no family logic)
-    ├── wires.py        # sub-wire scan + stream string extraction
-    ├── sources.py      # opcode-source resolution (m5 captures, offline keytable)
-    ├── signature.py    # parameter/type metadata + param_list
-    ├── pipeline.py     # lift_file: component discovery → assembly → listing
-    └── handlers/       # one module per opcode family (arithmetic/arrays/calls/
-                        # control/objects/variables/misc), ~≤250 lines each
-
-Every module stays under 250 lines. The decode layers (container/stream/wire/
-crypto) are frozen and untouched by the refactor.
-
 ## Commands (mirroring the PHP CLIs)
 
 | command | PHP counterpart | what it does |
@@ -112,27 +90,6 @@ from `--m5-dir` / `$IONCUBE_RE_M5_DIR` instead of a hardcoded relative path.
 | Wire grammar | sig mode (v>5, eval 8.1 + CE 8.4 chunks) and nosig mode (v≤5, CE 8.2/8.3 chunks), auto-detected | M6-OPERANDS §1.1 |
 | Opcode table | PHP 8.1 names (201) | php81 container binary |
 | Offline keytable | MWC6^ierg formula (ClientExec generation + eval); Blesta's older generation fails the validation gate (wire-only lift) | M6-KEYTAB |
-
-## Validation summary (all asserted in `tests/`)
-
-- Crypto: byte-exact against the live gdb captures: K/escdec, pbl ciphers,
-  adler17, MD4-fold = 120, the 172/172 main blobs, 368/368 component cipher,
-  11/11 offline keytables.
-- Stream: byte-exact: marker81 1007/1007 against the readerA concatenation;
-  python vs `php legacy-php/ic_stream.php` on marker81 + 3 CE files + 1
-  blesta file (streams, component blobs, plains, and the frame-codec
-  intermediates, the latter via a /tmp PHP harness that eval-loads the frozen
-  library).
-- Wire: full stdout byte-identical to `php legacy-php/ic_wire.php --offline`
-  on all 11 eval wires + CE streams; the 11-component gt table (105 gt
-  oplines + 16 rule-expanded = 121/121 nodes, zero MISS); the CE 17-file ×
-  3-chunk walk==EOF sweep with every demasked final in the opcode range.
-- Lift: marker81 lifts to `function hello(string $who): string { return
-  'hi ' . $who; }` + `echo hello('AAAA_marker_0001');` (semantic match to the
-  ground-truth marker.php, matching decodephp.io's output); cron.php matches
-  decodephp's production preview statement-for-statement (§9.3, 6/6).
-- Corpus sweep: the CLI chain exits 0 on all 461 encoded files (455
-  ClientExec + 6 Blesta).
 
 ## Honest limitations (full list: `notes/PYTHON-PORT.md`)
 

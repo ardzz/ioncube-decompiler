@@ -1,9 +1,8 @@
 """The switch family: reconstruction from the CASE/JMPNZ dispatch chain
-(the CE generation), the jumptable-header form (the Blesta generation's
+(one encoder generation), the jumptable-header form (another generation's
 IS_EQUAL+JMPNZ chains), and the jumptable fallback when the chain did not
 reconstruct (the tables carry node targets directly on our build — the
-dawwinci stride-inference repair is unnecessary: the one-opcode-late
-family is already calibrated at the jt layer, DAWWINCI-DIFF §4.4).
+one-opcode-late family is already calibrated at the jt layer).
 """
 
 from __future__ import annotations
@@ -12,8 +11,8 @@ from ..serarr import decode_serarr
 from .model import LoopInfo, LiftContext
 from .operand import php_quote, unwrap
 
-_CMP_CASE = (48, 194)  # the CE generation's dispatch comparisons
-_CMP_HEADER = (48, 194, 18)  # + IS_EQUAL: the Blesta generation's form
+_CMP_CASE = (48, 194)  # one generation's dispatch comparisons
+_CMP_HEADER = (48, 194, 18)  # + IS_EQUAL: the other generation's form
 _COND_JUMPS = (43, 44, 46, 47)
 
 
@@ -52,9 +51,9 @@ def emit_case(ctx: LiftContext, i: int, end: int) -> int:
 def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int | None:
     """The switch reconstruction. header=True enters at the jumptable
     header (SWITCH_LONG/STRING) — the Part C path that also matches the
-    Blesta generation's IS_EQUAL+JMPNZ chains and falls back to the
-    jumptable itself; header=False enters at the first CASE (the CE
-    form, the pre-Part-C behavior)."""
+    other generation's IS_EQUAL+JMPNZ chains and falls back to the
+    jumptable itself; header=False enters at the first CASE (the plain
+    dispatch-chain form)."""
     from .emitter import emit_region
 
     cmp_ops = _CMP_HEADER if header else _CMP_CASE
@@ -132,7 +131,7 @@ def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int
         subj = ctx.render.ex_op1(ctx.nodes[i])
     # switch end: the subject temp's FREE when one exists (php-src frees the
     # subject right after the dispatch), else the furthest-forward JMP out of
-    # the case bodies (dawwinci _find_subject_free / _infer_switch_end)
+    # the case bodies
     switchEnd = None
     if subj_slot is not None:
         for k in range(stop, min(end, ctx.thr - 1) + 1):
@@ -188,12 +187,10 @@ def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int
 
 def _table_pairs(ctx: LiftContext, i: int):
     """The jumptable in the header's op2 (a const serarr zval) maps case
-    values to NODE targets — the Blesta generation carries node indices
-    directly (verified: license.php setError's table == the JMPNZ chain
-    targets). When the dispatch chain did not reconstruct, the table IS
-    the chain (the dawwinci jump-table repair, their stride-inference
-    variant is unnecessary here: our tables are node-indexed, and the
-    one-opcode-late family is already calibrated at the jt layer)."""
+    values to NODE targets — one generation carries node indices directly.
+    When the dispatch chain did not reconstruct, the table IS the chain
+    (our tables are node-indexed, and the one-opcode-late family is
+    already calibrated at the jt layer)."""
     n = ctx.nodes[i]
     e = n.ent.get("op2")
     if not e or e.kind != 1 or e.raw >= len(ctx.zvals):

@@ -19,13 +19,11 @@ analysis passes below are its __init__ verbatim, plus the loop_stack /
 goto-target state the structurer upgrades need). The three documented
 wire ABI facts each live in exactly ONE place:
 
-  * the +2 anti-tamper garble table — ``_ungarble`` below (M6-SUBWIRE §7.5,
-    extended by the SWITCH_LONG/SWITCH_STRING pair, HANDLERS-PORT §1);
+  * the +2 anti-tamper garble table — ``_ungarble`` below, extended by the
+    SWITCH_LONG/SWITCH_STRING pair;
   * the CV-slot +5 rule — operand.py ``OperandRenderer.ex`` (the x86_64
-    ABI: slot numbering starts at execute_data's 5 slots, M6-OPERANDS §1.3,
-    loader-verified; the dawwinci 3-slot fallback is wrong for us —
-    DAWWINCI-DIFF §4.3);
-  * the DO-node stopping point — collectors.py (M6-SUBWIRE §7.6).
+    ABI: slot numbering starts at execute_data's 5 slots, loader-verified);
+  * the DO-node stopping point — collectors.py.
 """
 
 from __future__ import annotations
@@ -139,7 +137,7 @@ class LiftContext:
     masked: int = 0
     unknown: int = 0
 
-    # structurer-upgrade state (notes/DAWWINCI-DIFF.md §5 items 3-4)
+    # structurer-upgrade state
     loop_stack: list[LoopInfo] = field(default_factory=list)
     valid_php: bool = False  # --valid-php: goto-label fallback mode
     debug: bool = False  # --debug: line markers + node-accounting comments
@@ -288,10 +286,9 @@ _INIT_CALL = frozenset({59, 61, 69, 112, 113, 118, 128})
 
 
 # plumbing + pure sets for the single-use temp inlining decision —
-# ic_lift.php's inlinable() lists, verbatim (the $pure list is what the
-# repair §2.1-1 ported; without it every CONCAT chain broke at the first
-# FETCH_CONSTANT link). CHECK_FUNC_ARG(100) joins the plumbing: by-ref
-# arg glue between NEW/INIT and its SENDs broke NEW+ASSIGN inlining
+# the $pure list is load-bearing: without it every CONCAT chain broke at
+# the first FETCH_CONSTANT link. CHECK_FUNC_ARG(100) joins the plumbing:
+# by-ref arg glue between NEW/INIT and its SENDs broke NEW+ASSIGN inlining
 # ($packagegateway = $V14 — EmailsController n10 sits between the NEW
 # def and the ASSIGN read).
 _PLUMBING = frozenset(

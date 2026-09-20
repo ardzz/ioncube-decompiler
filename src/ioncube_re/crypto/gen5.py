@@ -1,8 +1,7 @@
 """X3_(5) CMWC-hybrid PRNG (seeder 0x106335, gen 0x1064a5) — the layer-A keystream.
 
 CMWC4096 (a=18782) mixed with an LCG(69069) and a parity-selected xorshift;
-1 low byte per output. Byte-exact port of ic_decrypt.php IcGen5 (validated
-against live gdb captures — M4-KEYSTREAM.md §8).
+1 low byte per output. Validated against live loader captures.
 """
 
 M32 = 0xFFFFFFFF

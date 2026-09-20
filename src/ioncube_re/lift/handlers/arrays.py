@@ -1,9 +1,8 @@
 """Array-literal families: ADD_ARRAY_ELEMENT continuation (the collectArray
 run's statement-level tail), ADD_ARRAY_UNPACK, the specialized IN_ARRAY.
 
-Semantics ported from dawwinci/ioncube-php8-decompiler (MIT License,
-Copyright (c) 2026 dawwinci, commit 2f2f35c) — decompiler/handlers/
-arrays.py:22-53 — see notes/HANDLERS-PORT.md §1.
+Semantics follow dawwinci/ioncube-php8-decompiler (MIT License,
+Copyright (c) 2026 dawwinci), decompiler/handlers/arrays.py:22-53.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ def _array_item(ctx: LiftContext, n) -> str:
     return v
 
 
-@opcode_handler(72)  # ADD_ARRAY_ELEMENT (dawwinci arrays.py:22-33)
+@opcode_handler(72)  # ADD_ARRAY_ELEMENT
 def _add_array_element(ctx: LiftContext, i: int, end: int) -> int:
     # collect_array consumes the contiguous run; when a construct starter
     # (nested call) interrupted it, the run continues here: the res slot
@@ -43,14 +42,14 @@ def _add_array_element(ctx: LiftContext, i: int, end: int) -> int:
     if prev is not None and prev.startswith("[") and prev.endswith("]"):
         ctx.tempExpr[slot] = prev[:-1] + (", " if len(prev) > 2 else "") + item + "]"
     else:
-        # no live array temp (dawwinci's "without live array temp" fallback)
+        # no live array temp fallback
         if slot is not None:
             ctx.tempExpr[slot] = "[" + item + "]"
     ctx.emitted += 1
     return i + 1
 
 
-@opcode_handler(147)  # ADD_ARRAY_UNPACK (dawwinci arrays.py:36-43)
+@opcode_handler(147)  # ADD_ARRAY_UNPACK
 def _add_array_unpack(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     item = "..." + ctx.render.ch(ctx.render.ex_op1(n))
@@ -64,7 +63,7 @@ def _add_array_unpack(ctx: LiftContext, i: int, end: int) -> int:
     return i + 1
 
 
-@opcode_handler(187)  # IN_ARRAY (dawwinci arrays.py:46-53)
+@opcode_handler(187)  # IN_ARRAY
 def _in_array(ctx: LiftContext, i: int, end: int) -> int:
     # the real specialized in_array (res temp, haystack expression); the
     # switch-header garble (res unused + const jumptable op2) was rewritten

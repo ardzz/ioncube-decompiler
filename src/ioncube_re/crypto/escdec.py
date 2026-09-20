@@ -1,7 +1,7 @@
 """FUN_00141398 escape codec (escdec) — 24-byte header / adler fields.
 
 Rules: b != 0xFF -> b; "FF xx" with xx < 0x80 -> 0xFF; "FF xx" with xx >= 0x80
--> 0x3C. Byte-exact port of ic_decrypt.php escdec(). Returns (out, new_pos).
+-> 0x3C. Returns (out, new_pos).
 """
 
 ESC_FF = 0xFF

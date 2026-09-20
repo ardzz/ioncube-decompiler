@@ -1,4 +1,4 @@
-"""Offline keytable derivation (M6-KEYTAB.md — the Wc9 formula, live-validated).
+"""Offline keytable derivation (the Wc9 formula, live-validated).
 
 ktab[i] = MWC6(seedA, seedB)[i] ^ ierg, for i in 0..thr — packed u32-LE.
   seedA/seedB = the stream-descriptor u32s (+0x14/+0x18 in memory,

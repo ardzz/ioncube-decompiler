@@ -22,7 +22,7 @@ _SC_PURE = (
 
 
 def loop_exit_stmt(ctx: LiftContext, target: int) -> str | None:
-    """break;/continue; with level (dawwinci structurer.py:244-250)."""
+    """break;/continue; with level."""
     for depth, loop in enumerate(reversed(ctx.loop_stack), start=1):
         if target in loop.break_targets:
             return "break;" if depth == 1 else f"break {depth};"
@@ -404,8 +404,8 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
         and ctx.jt[t - 1] <= end
     )
     # (Part C) ternary: both arms are pure-def runs ending in a QM_ASSIGN
-    # into the same temp slot (the JMPZ/QM_ASSIGN lowering — dawwinci
-    # structurer.py:196-212; arms may be multi-node: `isset($a['k']) ?
+    # into the same temp slot (the JMPZ/QM_ASSIGN lowering; arms may be
+    # multi-node: `isset($a['k']) ?
     # $a['k'] : 25` lowers to FETCH_R+FETCH_DIM_R+QM_ASSIGN)
     if hasElse:
         skip = ctx.jt[t - 1]
@@ -449,8 +449,7 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
 
 
 def emit_jmp_set(ctx: LiftContext, i: int, end: int) -> int:
-    """`a ?: b` — the JMP_SET short-circuit (Part C; dawwinci
-    structurer.py:379-396). The alternative region computes into the same
+    """`a ?: b` — the JMP_SET short-circuit (Part C). The alternative region computes into the same
     res slot; the result temp carries the full elvis expression. Falls back
     to the pre-Part-C partial (op1 only) when the shape is unsupported."""
     from .emitter import emit_region

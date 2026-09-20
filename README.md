@@ -11,53 +11,56 @@ loader is never executed.
 
 ### Example
 
-The `demo/` folder ships both sides: `demo/demo-source.php` is the original
-source (note the hardcoded HMAC signing key), and `demo/demo-encoded.php` is
-that file compiled with the ionCube 8.1 evaluation encoder. Lifting the
-encoded file:
+The `demo/` folder ships the full round trip: `demo/demo-source.php` is the
+original source (note the hardcoded HMAC signing key), `demo/demo-encoded.php`
+is that file compiled with the ionCube 8.1 evaluation encoder, and
+`demo/demo-lifted.php` is what this tool recovers from the encoded file:
 
-    uv run ioncube-re lift demo/demo-encoded.php
+```php
+$ uv run ioncube-re lift demo/demo-encoded.php
+<?php
+$issuer = new LicenseIssuer();
+$token = $issuer->issue('acme-corp', time());
+$issuer->daysLeft($token, time());
+printf("token=%s days_left=%d\n", $token); /* no DO_FCALL seen */
 
-    <?php
-    $issuer = new LicenseIssuer();
-    $token = $issuer->issue('acme-corp', time());
-    $issuer->daysLeft($token, time());
-    printf("token=%s days_left=%d\n", $token); /* no DO_FCALL seen */
-
-    class LicenseIssuer {
-        function issue(string $customer, int $now): string {
-            $stamp = base_convert((string)($now), 10, 36);
-            $customer = strtoupper($customer);
-            $sig = substr(hash_hmac('sha256', $customer . $stamp, '81518ad9d596db1456828f0391e37436b85af7cac607fc56b203fea292f0f66e6'), 0, 16);
-            return $customer . ':' . $stamp . ':' . strtoupper($sig);
-        }
-
-        function daysLeft(string $token, int $now): int {
-            $V8 = explode(':', $token);
-            $customer = $V8[0];
-            $stamp = $V8[1];
-            $sig = $V8[2];
-            $issued = (int)(base_convert($stamp, 36, 10));
-            $age = intdiv(($now - $issued), 86400);
-            $T21 = $age < 0;
-            $T21 = (bool)((14 < $age));
-            if ($age < 0 || (bool)((14 < $age))) {
-                return 0;
-            }
-            $expect = strtoupper(substr(hash_hmac('sha256', $customer . $stamp, '81518ad9d596db1456828f0391e37436b85af7cac607fc56b203fea292f0f66e6'), 0, 16));
-            if (!(hash_equals($expect, $sig))) {
-                return 0;
-            }
-            return 14 - $age;
-        }
-
+class LicenseIssuer
+{
+    function issue(string $customer, int $now): string
+    {
+        $stamp = base_convert((string)($now), 10, 36);
+        $customer = strtoupper($customer);
+        $sig = substr(hash_hmac('sha256', $customer . $stamp, '81518ad9d596db1456828f0391e37436b85af7cac607fc56b203fea292f0f66e6'), 0, 16);
+        return $customer . ':' . $stamp . ':' . strtoupper($sig);
     }
-    LINT: OK
 
-The lifted output passes `php -l`. Typed signatures, constant literals, and
-string data come from the wire; `$V*`/`$T*` names mark values the wire does
-not name (temporary variables), and the `/* no DO_FCALL seen */` comment flags
-a discarded call result the encoder optimized away.
+    function daysLeft(string $token, int $now): int
+    {
+        $V8 = explode(':', $token);
+        $customer = $V8[0];
+        $stamp = $V8[1];
+        $sig = $V8[2];
+        $issued = (int)(base_convert($stamp, 36, 10));
+        $age = intdiv(($now - $issued), 86400);
+        $T21 = $age < 0;
+        $T21 = (bool)((14 < $age));
+        if ($age < 0 || (bool)((14 < $age))) {
+            return 0;
+        }
+        $expect = strtoupper(substr(hash_hmac('sha256', $customer . $stamp, '81518ad9d596db1456828f0391e37436b85af7cac607fc56b203fea292f0f66e6'), 0, 16));
+        if (!(hash_equals($expect, $sig))) {
+            return 0;
+        }
+        return 14 - $age;
+    }
+
+}
+```
+
+The recovered listing passes `php -l`. Typed signatures, constant literals,
+and string data come from the wire; `$V*`/`$T*` names mark values the wire
+does not name (temporary variables), and the `/* no DO_FCALL seen */` comment
+flags a discarded call result the encoder optimized away.
 
 Note what survived decompilation: the "hidden" signing key. ionCube
 obfuscation protects code structure, not the data inside it. Keep secrets

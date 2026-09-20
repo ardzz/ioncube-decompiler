@@ -6,7 +6,7 @@
                remaining output (loader behavior);
   b0 < 0x80 -> 227-byte raw block (only when >= 227 remain; else the loop
                exits).
-Byte-exact port of ic_decrypt.php pbl_decode(). Returns (out, new_pos).
+Byte-exact port of the loader's pbl_decode(). Returns (out, new_pos).
 """
 
 
@@ -23,7 +23,7 @@ def pbl_decode(data: bytes, pos: int, length: int) -> tuple[bytes, int]:
             if b1 != 0 and length - len(out) >= b1:
                 if pos + b1 > n:
                     raise ValueError("pbl: literal run out of range")
-                out += data[pos:pos + b1]
+                out += data[pos : pos + b1]
                 pos += b1
             if b0 & 0x40:
                 out.append(0x3C)
@@ -31,7 +31,7 @@ def pbl_decode(data: bytes, pos: int, length: int) -> tuple[bytes, int]:
             if length - len(out) >= 0xE3:
                 if pos + 0xE3 > n:
                     raise ValueError("pbl: raw block out of range")
-                out += data[pos:pos + 0xE3]
+                out += data[pos : pos + 0xE3]
                 pos += 0xE3
             else:
                 break  # loader exits the loop when < 227 remain

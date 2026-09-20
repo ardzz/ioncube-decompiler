@@ -7,8 +7,7 @@ mutates accounting: rendering only reads the context.
 
 The CV-slot +5 rule lives HERE, in ``ex``: a temp/VAR operand renders as
 $T/$V with the slot number minus 5 — the x86_64 ABI (execute_data's 5
-fixed slots precede the CVs; loader-verified, M6-OPERANDS §1.3 — the
-dawwinci 3-slot fallback is a different, 32-bit ABI, DAWWINCI-DIFF §4.3).
+fixed slots precede the CVs; loader-verified).
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ def zval_php(z: dict, idx: int) -> str:
         if z.get("b"):
             # 64-bit IS_LONG (the wire carries low/high words): sign-extend
             # (gdiverse4 -3 = {a:0xFFFFFFFD, b:0xFFFFFFFF}). b==0 keeps the
-            # u32 view — the PHP oracle print and ClientExec's 0xFFFFFFFF
+            # u32 view — the reference print and the production files' 0xFFFFFFFF
             # sentinel both rely on it.
             v = ((z["b"] & 0xFFFFFFFF) << 32) | (z["a"] & 0xFFFFFFFF)
             if v >= 1 << 63:
@@ -49,13 +48,13 @@ def zval_php(z: dict, idx: int) -> str:
             # high-word garbage (the ktab mask rides only the high word:
             # every fresh eval encode, 34/34 measured sites — demo class,
             # fn, probe, gt1 re-encode — recover exactly via sext32(a);
-            # the clean m5 captures all fit i32, and the production corpus
-            # carries zero out-of-i32 longs). True >2^31 ints on eval
+            # the clean captures all fit i32, and production files carry
+            # zero out-of-i32 longs). True >2^31 ints on eval
             # files are the casualty; a plausible wrong int beats an
             # absurd masked one.
             a = z["a"] & 0xFFFFFFFF
             return str(a - (1 << 32) if a >= 1 << 31 else a)
-        return str(z["a"])  # int (u32 view — matches the PHP oracle print)
+        return str(z["a"])  # int (u32 view)
     if t == 5:
         # IS_DOUBLE: the 64-bit value lives in the low/high words
         d = struct.unpack(
@@ -83,12 +82,12 @@ def zval_php(z: dict, idx: int) -> str:
                     return name if name in CONSTANT_TOKENS else php_quote(name.encode())
                 return render_placeholder(-signed, z.get("len", 0))
         return f"/*str?{idx}*/"
-    if t == 7:  # serialized-array zval — the dawwinci grammar (serarr.py)
+    if t == 7:  # serialized-array zval (serarr.py)
         if "str" in z:
             pairs = decode_serarr(z["str"])
             if pairs is not None:
                 return php_array_literal(pairs)
-            # parse failed: fall back to the string-scrape (M6 §7.7) —
+            # parse failed: fall back to the string-scrape —
             # `s<len>'<bytes>` with no closing quote: the value starts
             # right at the match end
             items = []
@@ -193,8 +192,7 @@ _ZEND_TYPES = {
 def typecheck_bits(ext: int) -> str:
     """A TYPE_CHECK (op 123) ext: small values (<= 15) are the plain zend
     type enum (is_long etc.); larger values are the 1<<type BITMASK the
-    encoder emits for compiled type checks (64 = IS_STRING, 128 = IS_ARRAY
-    on the corpus)."""
+    encoder emits for compiled type checks (64 = IS_STRING, 128 = IS_ARRAY)."""
     if ext <= 15:
         return cast_name(ext)
     bits = [b for b in _ZEND_TYPES if ext & (1 << b)]
@@ -244,7 +242,7 @@ class OperandRenderer:
                 slot = es
             if self.ctx.inlinable(slot, n.i):
                 return self.ctx.tempExpr[slot]
-            # the CV-slot +5 rule (x86_64 ABI, M6-OPERANDS §1.3)
+            # the CV-slot +5 rule (x86_64 ABI)
             return ("$V" if t & 4 else "$T") + str(slot - 5)
         if t == 1 and raw < len(self.ctx.zvals):
             return zval_php(self.ctx.zvals[raw], raw)

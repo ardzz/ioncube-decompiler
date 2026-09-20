@@ -1,8 +1,7 @@
-"""ioncube-re — offline ionCube Loader 15.5.0 research toolchain.
+"""ioncube-re — offline ionCube decompiler (decrypt, stream, wire, lift).
 
-Python port of the frozen PHP oracles (ic_decrypt / ic_stream / ic_wire /
-ic_lift) from the research workspace, with the two benchmark-driven emitter
-gaps closed: interned-name resolution and arg_info typed signatures.
+Pure-Python, stdlib-only at runtime: it parses the ionCube file formats
+directly and never executes the loader.
 """
 
 __version__ = "1.0.0"

@@ -1,10 +1,10 @@
-"""Interned-name resolution (benchmark gap #1, BENCHMARK-DECODEPHP.md §9).
+"""Interned-name resolution.
 
 Wire zvals with negative pool offsets reference the loader's interned-name
 cache: ``pooloff = -N`` resolves to ``dummy_int2[N]``, a lazily-decoded cache
 over the loader's static dfloat2 dictionary (Hhg 0x407a5). The full table is
 statically extractable from the loader's .data and live-verified
-(notes/INTERNED.md — 591 static entries + the -1/-2 dynamic specials,
+(591 static entries + the -1/-2 dynamic specials,
 byte-identical across the 8.1/8.2/8.4 loaders); it lives in
 ``interned_data.py``.
 
@@ -20,8 +20,17 @@ Resolution policy:
 
 from .interned_data import INTERNED_DYNAMIC, INTERNED_STATIC
 
-CONSTANT_TOKENS = frozenset({"__FILE__", "__DIR__", "__LINE__", "__FUNCTION__",
-                             "__CLASS__", "__METHOD__", "__NAMESPACE__"})
+CONSTANT_TOKENS = frozenset(
+    {
+        "__FILE__",
+        "__DIR__",
+        "__LINE__",
+        "__FUNCTION__",
+        "__CLASS__",
+        "__METHOD__",
+        "__NAMESPACE__",
+    }
+)
 
 TABLE_MAX = max(INTERNED_STATIC)
 

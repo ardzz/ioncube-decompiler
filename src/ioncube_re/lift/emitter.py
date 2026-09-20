@@ -18,8 +18,8 @@ from .registry import HANDLERS
 
 def walk_component(ctx: LiftContext) -> str:
     """Lift one component: the full statement walk + the accounting footer
-    (E+B+M+U; the display-level drift vs thr is documented in
-    HANDLERS-PORT.md §4 — no node is dropped or double-rendered in text)."""
+    (E+B+M+U; the display-level drift vs thr is documented here —
+    no node is dropped or double-rendered in text)."""
     emit_region(ctx, 0, ctx.thr)
     if ctx.debug:
         ctx.w(

@@ -3,9 +3,8 @@
 A wire zval with pooloff = -N resolves to this name (the loader's Hhg decoder
 at 0x407a5: dummy_int2[N], a lazily-decoded cache over the loader's own
 static dfloat2 dictionary). Statically extracted from the loader's .data
-(Qo9-XOR-obfuscated) and live frida-verified — notes/INTERNED.md in the
-research workspace; byte-identical across the 8.1/8.2/8.4 loaders (v15.5.0).
-Source JSON: work/dumps/interned/interned_names.json.
+(Qo9-XOR-obfuscated) and live-verified; byte-identical across the
+8.1/8.2/8.4 loaders (v15.5.0).
 
 The dynamic specials resolve BEFORE the table in the decoder: -1 = __FILE__
 (the caller-supplied name; the wire len field carries the encode-time path
@@ -605,7 +604,8 @@ INTERNED_STATIC: dict[int, str] = {
     11: "_SESSION",
     10: "_SERVER",
     9: "_POST",
-    8: "_GET",}
+    8: "_GET",
+}
 
 # caller-supplied (dynamic) slots handled before the table by Hhg
 INTERNED_DYNAMIC: dict[int, str] = {

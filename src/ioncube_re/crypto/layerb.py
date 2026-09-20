@@ -1,11 +1,10 @@
-"""Layer-B component cipher (M4 §5): X3_(6) keyed by jenkins+murmur of the key.
+"""Layer-B component cipher: X3_(6) keyed by jenkins+murmur of the key.
 
 w = jenkins_oaat(key) (signed bytes), z = murmur3_32(key, 0x1f);
 out[i] = cipher[i] ^ ((mwc6_stream(w, z)[i] >> 8) & 0xff).
 
-The eval/production component key is the 17-byte 0x01*16 + 0x00 (live-captured,
-M4 §9 / M5-PROD). Byte-exact port of ic_decrypt.php component_decrypt() —
-verified against the compdec_0001 gdb captures.
+The eval/production component key is the 17-byte 0x01*16 + 0x00
+(live-captured), verified against live loader captures.
 """
 
 from .mwc6 import mwc6_stream
@@ -39,7 +38,7 @@ def murmur3_32(key: bytes, seed: int) -> int:
     n = len(key)
     nb = n & ~3
     for i in range(0, nb, 4):
-        k = int.from_bytes(key[i:i + 4], "little")
+        k = int.from_bytes(key[i : i + 4], "little")
         k = (k * c1) & M32
         k = _rol32(k, 15)
         k = (k * c2) & M32

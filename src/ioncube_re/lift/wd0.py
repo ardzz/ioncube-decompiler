@@ -2,8 +2,8 @@
 
 For a node whose anti-tamper signature does NOT validate (sig mode, v>5),
 the stored opcode byte is masked garbage; the true opcode comes from the
-wD0 variant tables inside the ionCube loader .so (M6-OPERANDS §2.3 — the
-Ghidra-decompiled wD0 path at 0x1dcbf6):
+wD0 variant tables inside the ionCube loader .so (the Ghidra-decompiled
+wD0 path at 0x1dcbf6):
 
     derived = k0 | k1<<8 | k2<<16 | (k0^k1)<<24     (k = ktab[thr+3i..])
     delta   = (derived ^ wire_sig) & 0xFFFF          (the encoder's overwrite)

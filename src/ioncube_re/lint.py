@@ -1,4 +1,4 @@
-"""The php -l output gate (the operator's lint contract, notes/LINT-GATE.md).
+"""The php -l output gate (the operator's lint contract).
 
 Lift output must parse as PHP. The primary engine is the php81-test
 container: the rendered listing is piped to ``docker exec -i php81-test

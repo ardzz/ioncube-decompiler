@@ -3,10 +3,10 @@
 z' = (z>>16) + (z&0xffff)*30345;  w' = (w>>16) + (w&0xffff)*18000;
 out = ROL16(z') + w'   (all mod 2^32).
 
-The keytable (M6-KEYTAB.md) packs (thr+1) outputs u32-LE, each XORed with
+The keytable packs (thr+1) outputs u32-LE, each XORed with
 ierg; the layer-B component cipher consumes (out >> 8) & 0xff per byte.
 The cache/rewind armature of the full X3_(6) object is never armed on any
-captured path (M6-KEYTAB §2) — the raw stepping below is byte-identical.
+captured path — the raw stepping below is byte-identical.
 """
 
 M32 = 0xFFFFFFFF

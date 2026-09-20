@@ -3,8 +3,7 @@ structurer.emit_if, bottom-tested with condition priming, do-while) and
 foreach (with the key-in-temp fold). The switch family lives in
 switches.py.
 
-The bottom-tested priming follows dawwinci's spec (structurer.py:296-345,
-README.md:127-132): `JMP -> Lcond; body; Lcond: cond; J(N)Z -> body` renders
+The bottom-tested priming shape: `JMP -> Lcond; body; Lcond: cond; J(N)Z -> body` renders
 as the condition statement (the priming read), `while (<loop var>) { body;
 <condition statement again> }` — the duplicated condition keeps the loop
 variable advancing; semantically equivalent, and the only faithful shape a
@@ -89,8 +88,8 @@ def bottom_tested_while(ctx: LiftContext, i: int, t: int, end: int) -> int | Non
     primed = len(ctx.out) > out0
     condLine = ctx.curLine
     # the loop variable: when the conditional's temp was defined by an
-    # ASSIGN to a CV, the while-condition renders that CV (dawwinci's
-    # ASSIGN stores the target; the inlined value would re-call fetch())
+    # ASSIGN to a CV, the while-condition renders that CV (the ASSIGN stores the
+    # target; the inlined value would re-call fetch())
     n_j = ctx.nodes[j]
     cond = ctx.render.ex_op1(n_j)
     eo = n_j.ent.get("op1")
@@ -127,7 +126,7 @@ def bottom_tested_while(ctx: LiftContext, i: int, t: int, end: int) -> int | Non
 
 def do_while_at(ctx: LiftContext, i: int, end: int) -> int | None:
     """`do { body } while (cond);` — a conditional back-edge targeting node
-    i, reached by fallthrough (dawwinci structurer.py:235-242). The dw edge
+    i, reached by fallthrough. The dw edge
     map is precomputed (model._calibrate_jumps); node i-1 being the entry
     JMP of a bottom-tested while excludes the pretested shape."""
     from .emitter import emit_region

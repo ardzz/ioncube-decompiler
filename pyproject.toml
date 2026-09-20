@@ -1,13 +1,10 @@
 [project]
 name = "ioncube-re"
 version = "1.0.0"
-description = "Offline ionCube Loader 15.5.0 research toolchain: decrypt, stream, wire, lift (Python port of the frozen PHP oracles)"
+description = "Offline ionCube decompiler: decrypt, stream, wire, lift — pure Python"
 readme = "README.md"
 requires-python = ">=3.12"
-# z3-solver and capstone are declared per the project spec: they back the
-# research lineage (the M6 z3 wire-mask solve, the loader disassembly work).
-# The shipped deterministic ports run on the stdlib alone and never import
-# them; the declarations keep the research environment reproducible.
+# Declared but unused by the shipped code: the runtime is stdlib-only.
 dependencies = ["z3-solver", "capstone"]
 
 [dependency-groups]

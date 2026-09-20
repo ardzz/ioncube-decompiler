@@ -83,7 +83,7 @@ def _instanceof(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     r = ctx.render
     # the class operand is a NAME, not a string literal: the zval form
-    # escapes backslashes (`BlestaAi\\Client`) — resolve the bare name
+    # escapes backslashes (`Vendor\\Client`) — resolve the bare name
     e2 = n.ent.get("op2")
     cls = None
     if e2 is not None and e2.kind == 1 and e2.raw < len(ctx.zvals):
@@ -136,7 +136,7 @@ def _cast(ctx: LiftContext, i: int, end: int) -> int:
     r = ctx.render
     if op == 123:
         # TYPE_CHECK carries a 1<<type BITMASK (64 = is_string,
-        # 128 = is_array on the corpus) — not the plain type enum CAST uses
+        # 128 = is_array) — not the plain type enum CAST uses
         e = typecheck_bits(n.ext)
         if "gettype($x)" in e:
             e = e.replace("gettype($x)", "gettype(" + r.ch(r.ex_op1(n)) + ")")

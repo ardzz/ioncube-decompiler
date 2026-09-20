@@ -210,7 +210,7 @@ def _assign_op(ctx: LiftContext, i: int, end: int) -> int:
             return i + 1
         if op == 26 and dataN is None:
             # the eval encoder's +2 anti-tamper on the compound-assign INT
-            # const (BENCHMARK2 §4.2): the loader's AssignOp handler
+            # const: the loader's AssignOp handler
             # subtracts 2 from the const zval at dispatch — arena-verified
             # (gflow zv5=3/zv6=5 in the materialized arena, runtime total=17
             # proving +=1/-=3). Only the direct scalar form: ASSIGN_DIM_OP/
@@ -309,7 +309,7 @@ def _assign_static_prop(ctx: LiftContext, i: int, end: int) -> int:
 
 def _name_var_text(ctx: LiftContext, n) -> str | None:
     """op1 as a variable NAME zval -> the fetch text: ``$superglobal`` for
-    the auto-globals (interned -8..-12 / pool strings, INTERNED.md §2),
+    the auto-globals (interned -8..-12 / pool strings),
     ``$GLOBALS['name']`` otherwise. None when op1 is not a name zval."""
     e = n.ent.get("op1")
     if e is None or e.kind != 1 or e.raw >= len(ctx.zvals):
@@ -336,7 +336,7 @@ def _fetch_by_name(ctx: LiftContext, i: int, end: int) -> int:
     if var is not None:
         return ctx.def_temp(n, var, i)
     # unresolved name: the rendered op1 (quoted constant / placeholder), or
-    # the oracle's op2 fallback when op1 is not a zval at all
+    # the op2 fallback when op1 is not a zval at all
     e = n.ent.get("op1")
     fallback = r.ch(r.ex_op1(n)) if e is not None and e.kind == 1 else r.ch(r.ex_op2(n))
     return ctx.def_temp(n, "$GLOBALS[" + fallback + "]", i)
@@ -347,7 +347,7 @@ def _fetch_constant(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     r = ctx.render
     # the name zval raw string, no php_quote escaping: a constant
-    # REFERENCE (\Name\Space\CONST), never a literal (ic_lift parity)
+    # REFERENCE (\Name\Space\CONST), never a literal
     c = None
     e2 = n.ent.get("op2")
     if (
@@ -362,9 +362,8 @@ def _fetch_constant(ctx: LiftContext, i: int, end: int) -> int:
     else:
         # the compiler qualifies unqualified constants with the current
         # namespace (`blesta\app\models\DS`); an undefined namespaced
-        # constant falls back to the global name at runtime, and the
-        # corpus's defines are all global — render the last segment
-        # (ic_lift GT parity: `DS`, `VENDORDIR`, `STR_PAD_RIGHT`)
+        # constant falls back to the global name at runtime, and real-world
+        # defines are almost always global — render the last segment
         c = c.rsplit("\\", 1)[-1]
     return ctx.def_temp(n, c, i)
 

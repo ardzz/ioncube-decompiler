@@ -1,4 +1,4 @@
-"""Component WIRE format parser + node assembler (ic_wire port, M6-OPERANDS).
+"""Component WIRE format parser + node assembler.
 
 Grammar (FUN_002086c8): [0x7c] op-array header (31 u32s) -> checksum u32 ->
 opa+0x40 u32 -> [16] fn-name record if hdr+0x08 -> [16] doc record if
@@ -11,7 +11,7 @@ entries -> [lc*16] literals -> [lr*16] live ranges -> opa+0x38 u32 -> pool
 sub-function components.
 
 The op-array grammar is VERSION-GATED: v>5 wires carry [op][sig] per node
-(eval 8.1, CE 8.4 chunks), v<=5 wires carry [op] only (CE 8.2/8.3 chunks,
+(newer-generation 8.1/8.4 chunks), v<=5 wires carry [op] only (older 8.2/8.3 chunks,
 mask loses its K2 leg). Mode = auto-detected by exact u32/entry consumption
 (unique on 62/62 wires).
 
@@ -135,8 +135,8 @@ def parse_wire(
     htc = r.i32()
     statics: list[tuple[bytes, bytes]] = []
     if htc > 0:
-        # The positive count carries the static-variables table (M6 wire
-        # reader not modeled before; gfuncs/tally layout, byte-verified):
+        # The positive count carries the static-variables table (gfuncs/tally
+        # layout, byte-verified):
         # per entry a key chunk + a value chunk, each [u32 ctrl][ctrl&0xFF
         # bytes] (ctrl 0x2000000N: N = inline data length). tally:
         # [20000005]'calls' + [20000010]'i0;4;4294967295;' = 29 B.
@@ -235,7 +235,7 @@ def parse_wire(
             break
     if not modeok:
         print(
-            f"ic_wire: WARNING: neither grammar fits thr={thr} opcnt={opcnt} entcnt={entcnt}; "
+            f"wire: WARNING: neither grammar fits thr={thr} opcnt={opcnt} entcnt={entcnt}; "
             "node decode is UNRELIABLE",
             file=sys.stderr,
         )
@@ -375,7 +375,7 @@ def parse_wire(
     }
 
 
-# ---------------- rendering (byte-exact with the PHP oracle) ----------------
+# ---------------- rendering ----------------
 
 
 _ADDCSLASH_SPECIAL = {0x09: "\\t", 0x0A: "\\n", 0x0B: "\\v", 0x0C: "\\f", 0x0D: "\\r"}
@@ -493,7 +493,7 @@ def render_wire_report(r: dict, basename: str) -> list[str]:
     return out
 
 
-# ---------------- stream descriptor (M6-OPERANDS §1.3) ----------------
+# ---------------- stream descriptor ----------------
 
 
 def parse_stream_desc(s: bytes) -> dict | None:
@@ -564,7 +564,7 @@ _GT_LINE = re.compile(r"^\s*\d{4}\s")
 
 
 def gt_check(nodes: list[dict], gtlines: list[str]) -> tuple[int, int, int, list[str]]:
-    """Subsequence alignment with the M5-HANDLERS §4 compilation rules.
+    """Subsequence alignment with the gt compilation rules.
 
     Returns (ok, total_nodes, rule_expanded, misses)."""
     ok = 0
@@ -620,7 +620,7 @@ def offline_params(
     mainblob_file=None,
     desc=None,
 ):
-    """Fill (seedA, seedB, ierg, x) from the offline sources (ic_wire kt_offline_params)."""
+    """Fill (seedA, seedB, ierg, x) from the offline sources."""
     if seed_a is None and seeds is not None:
         m = re.match(
             r"^(0x[0-9a-fA-F]+|\d+)\s*,\s*(0x[0-9a-fA-F]+|\d+)$", seeds.strip()

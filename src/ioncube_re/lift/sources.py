@@ -1,6 +1,6 @@
 """Opcode-source resolution: how each wire's opcodes get demasked — the m5
 arena/ktab capture auto-discovery, the explicit capture pairs, and the
-M6-KEYTAB offline keytable with its validation gate."""
+offline keytable with its validation gate."""
 
 from __future__ import annotations
 
@@ -83,11 +83,11 @@ def best_pair(wire: bytes, pairs: list[tuple[str, str]]) -> tuple[dict, str] | N
     return best
 
 
-# ---- the offline keytable (M6-KEYTAB) ----
+# ---- the offline keytable ----
 
 
 def offline_parse(wire: bytes, seeds, ierg: int | None, x: int, sig_gate: bool):
-    """Derive the offline keytable, reparse, VALIDATE (M6-KEYTAB §1.1):
+    """Derive the offline keytable, reparse, VALIDATE:
     >= 95% finals in the opcode range, last node RETURN/VERIFY_NEVER_TYPE;
     eval v>5 additionally sig-gates (the encoder garbles wD0 raw bytes).
     Returns (reparse, 'offline-ktab') or None."""

@@ -1,12 +1,11 @@
-"""ionCube serialized constant-array decoder — the dawwinci grammar port.
+"""ionCube serialized constant-array decoder.
 
 ionCube compiles PHP array literals with all-constant values into a binary
 format (a variant of PHP's serialize() output) and stores them in the wire
-pool; zvals with type&0xff==7 carry the blob. The grammar (ported verbatim
-in structure from dawwinci/ioncube-php8-decompiler
-src/php_reconstructor/utils/php_values.py:70-221, MIT License, Copyright (c)
-2026 dawwinci <goamcisa@gmail.com> — see notes/DAWWINCI-DIFF.md §1 row 1/§3
-for the byte-level verification of this grammar on our corpora):
+pool; zvals with type&0xff==7 carry the blob. The grammar follows
+dawwinci/ioncube-php8-decompiler
+src/php_reconstructor/utils/php_values.py:70-221 (MIT License, Copyright (c)
+2026 dawwinci <goamcisa@gmail.com>):
 
     array    = '[' entry* '}' trailer
     entry    = str_entry | int_entry
@@ -22,7 +21,7 @@ for the byte-level verification of this grammar on our corpora):
     metadata = N x (DIGITS ";")     (N given by type_value; values are
                                      per-build hashes / type echoes — skipped)
 
-Our byte-level additions beyond their doc (notes/SERARR-PORT.md §2):
+Our byte-level additions beyond their doc:
   * production-generation pool blobs carry one leading 0x81 byte before the
     '[' (eval-generation blobs start at '[' directly) — skipped here;
   * empty arrays appear as type=007 (no refcounted bits) with the trailer
@@ -150,7 +149,7 @@ class _SerarrParser:
         if ch == "n":
             # the production encoder's null/bool scalars: a bare type char
             # followed by the 2 metadata fields (no payload digits) —
-            # dawwinci's eval-generation blobs never carry these
+            # eval-generation blobs never carry these
             return None, 2
         if ch == "t":
             return True, 2

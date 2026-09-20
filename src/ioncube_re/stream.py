@@ -1,4 +1,4 @@
-"""Layer-C/D component-stream codec (ic_stream port, M5-FROB / M5-PROD).
+"""Layer-C/D component-stream codec.
 
 Layer C "frame codec" (readerA refill 0x10c1d7+): 2-byte control frames —
   b0 < 0x80          -> b1 data bytes XORed with the X3_(5) keystream seeded
@@ -38,8 +38,7 @@ def frame_decode(raw: bytes, seed: int) -> tuple[bytes, int, int, int]:
     """Decode the frame codec; returns (intermediate, frames, checkpoints, adler).
 
     The reader adler is adler-32 with s1/s2 init 0 — computed with
-    zlib.adler32 (identical modular arithmetic; the NMAX=5552 blocking the
-    PHP oracle performs per data frame is not observable in the result)."""
+    zlib.adler32 (identical modular arithmetic)."""
     gen = Gen5(seed)
     s = 0  # (s2 << 16) | s1
     out = bytearray()
@@ -63,11 +62,15 @@ def frame_decode(raw: bytes, seed: int) -> tuple[bytes, int, int, int]:
             esc = bytearray()
             while len(esc) < 4:
                 if p >= n:
-                    raise StreamError(f"frame codec: truncated adler checkpoint at raw offset {pos}")
+                    raise StreamError(
+                        f"frame codec: truncated adler checkpoint at raw offset {pos}"
+                    )
                 b = raw[p]
                 if b == 0xFF:
                     if p + 1 >= n:
-                        raise StreamError(f"frame codec: dangling 0xff in checkpoint at {p}")
+                        raise StreamError(
+                            f"frame codec: dangling 0xff in checkpoint at {p}"
+                        )
                     esc.append(0x3C if (raw[p + 1] & 0x80) else 0xFF)
                     p += 2
                 else:
@@ -102,7 +105,9 @@ def frob_decode(inter: bytes) -> bytes:
     try:
         return zlib.decompress(inter, -15)
     except zlib.error as e:
-        raise StreamError(f"frob (deflate): inflate failed on the intermediate buffer: {e}") from e
+        raise StreamError(
+            f"frob (deflate): inflate failed on the intermediate buffer: {e}"
+        ) from e
 
 
 def decode_raw(raw: bytes, seed: int, region_off: int = 0) -> dict:
@@ -139,7 +144,7 @@ def prod_decode_file(path: str, only: int | None = None) -> dict:
             continue
         r = prod_container(c, f"chunk{n}")
         r["num"] = n
-        raw = c[r["region_off"]:]
+        raw = c[r["region_off"] :]
         inter, frames, ckpts, adler = frame_decode(raw, r["stream_seed"])
         stream = frob_decode(inter)
         r["inter"] = inter
@@ -159,7 +164,7 @@ def prod_decode_file(path: str, only: int | None = None) -> dict:
     return out
 
 
-# ---------------- verify helpers (ic_stream --verify) ----------------
+# ---------------- verify helpers ----------------
 
 
 def readers_concat(files: list[str]) -> tuple[bytes, int]:
@@ -190,10 +195,13 @@ def verify_stream(stream: bytes, files: list[str]) -> tuple[bool, str]:
             if first < 0:
                 first = i
             mism += 1
-    report = "VERIFY: decoded %d B vs concatenated readerA dumps: %d dumps, %d bytes total\n" % (
-        len(stream),
-        count,
-        len(cat),
+    report = (
+        "VERIFY: decoded %d B vs concatenated readerA dumps: %d dumps, %d bytes total\n"
+        % (
+            len(stream),
+            count,
+            len(cat),
+        )
     )
     if mism == 0 and len(stream) == len(cat):
         report += "VERIFY: %d/%d bytes MATCH — BYTE-EXACT\n" % (n, n)
@@ -203,6 +211,8 @@ def verify_stream(stream: bytes, files: list[str]) -> tuple[bool, str]:
         n,
         mism,
         max(first, 0),
-        "equal" if len(stream) == len(cat) else f"differ (stream {len(stream)}, dumps {len(cat)})",
+        "equal"
+        if len(stream) == len(cat)
+        else f"differ (stream {len(stream)}, dumps {len(cat)})",
     )
     return False, report

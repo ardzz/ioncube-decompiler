@@ -151,13 +151,13 @@ def lift_file(
         if d is not None:
             captureDirs.append(d)
             stderr.append(
-                "ic_lift: m5 capture match: %s (arena/ktab reuse)" % os.path.basename(d)
+                "lift: m5 capture match: %s (arena/ktab reuse)" % os.path.basename(d)
             )
     pairPool = capture_pairs(captureDirs)
     if arena and ktab:
         pairPool.insert(0, (arena, ktab))
 
-    # offline keytable inputs (M6-KEYTAB): ierg + X from the main blob
+    # offline keytable inputs: ierg + X from the main blob
     offlineIerg = None
     offlineX = 6 if isProd else 2
     if isProd:
@@ -165,13 +165,14 @@ def lift_file(
         cont = prod_container(chunks[chunk - 1], "lift")
         mb = layer_a(cont["blob"], cont["seed"])
         # mainblob: [ver@0][f@4][f@8][A@0xc][str_len@0x10][str bytes][IERG][namekey]
-        # [X if v>5] — ierg/X sit at 0x14/0x1c + str_len (eval/CE str_len=0;
-        # the Blesta generation carries a 16-byte string -> +0x10). M6-SUBWIRE §7.1.
+        # [X if v>5] — ierg/X sit at 0x14/0x1c + str_len (eval and most
+        # production generations carry str_len=0; some carry a 16-byte
+        # string -> +0x10).
         sl = u32(mb, 0x10)
         offlineIerg = u32(mb, 0x14 + sl)
         offlineX = u32(mb, 0x1C + sl)
         if offlineX > 64:
-            offlineX = 6  # implausible X (8.1-target chunks) -> CE default
+            offlineX = 6  # implausible X (8.1-target chunks) -> prod default
     else:
         dr = decrypt_file(path)  # validates adler+MD4
         sl = u32(dr["plain"], 0x10)
@@ -184,7 +185,7 @@ def lift_file(
     out: list[str] = ["<?php\n"]
     if debug:
         out.append(
-            f"// ic_lift: {os.path.basename(path)} — mode: {mode} — "
+            f"// lift: {os.path.basename(path)} — mode: {mode} — "
             f"{1 + len(subMeta)} component(s)\n"
         )
         if isProd:

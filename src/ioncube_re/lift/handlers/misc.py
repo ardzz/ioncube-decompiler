@@ -76,7 +76,7 @@ def _declare(ctx: LiftContext, i: int, end: int) -> int:
     return i + 1
 
 
-# ---- silence: the `@` operator (dawwinci misc.py:42-64) ----
+# ---- silence: the `@` operator ----
 
 
 @opcode_handler(57)  # BEGIN_SILENCE
@@ -105,7 +105,7 @@ def _end_silence(ctx: LiftContext, i: int, end: int) -> int:
     return i + 1
 
 
-# ---- statics, lexicals, closures (dawwinci misc.py:107-130, 184-233) ----
+# ---- statics, lexicals, closures ----
 
 
 @opcode_handler(181)  # BIND_STATIC
@@ -131,7 +131,7 @@ def _bind_static(ctx: LiftContext, i: int, end: int) -> int:
     return i + 1
 
 
-@opcode_handler(180)  # BIND_LEXICAL (dawwinci misc.py:124-130)
+@opcode_handler(180)  # BIND_LEXICAL
 def _bind_lexical(ctx: LiftContext, i: int, end: int) -> int:
     # the closure's `use (...)` clause is rendered by the DECLARE_LAMBDA
     # look-ahead; must NOT consume the closure temp in op1
@@ -139,7 +139,7 @@ def _bind_lexical(ctx: LiftContext, i: int, end: int) -> int:
     return i + 1
 
 
-@opcode_handler(142)  # DECLARE_LAMBDA_FUNCTION (dawwinci misc.py:184-233)
+@opcode_handler(142)  # DECLARE_LAMBDA_FUNCTION
 def _declare_lambda(ctx: LiftContext, i: int, end: int) -> int:
     # `use (...)` names: the BIND_LEXICAL run that follows, targeting this
     # node's res temp, in source order (their _collect_lexical_uses)
@@ -195,7 +195,7 @@ def _declare_lambda(ctx: LiftContext, i: int, end: int) -> int:
 # ---- the by-name one-liners ----
 
 
-@opcode_handler(122)  # DEFINED (dawwinci misc.py:164-171)
+@opcode_handler(122)  # DEFINED
 def _defined(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     nm = ctx.render.ch(ctx.render.ex_op1(n))
@@ -207,7 +207,7 @@ def _func_num_args(ctx: LiftContext, i: int, end: int) -> int:
     return ctx.def_temp(ctx.nodes[i], "func_num_args()", i)
 
 
-@opcode_handler(140)  # MAKE_REF (dawwinci misc.py:241-243)
+@opcode_handler(140)  # MAKE_REF
 def _make_ref(ctx: LiftContext, i: int, end: int) -> int:
     return ctx.def_temp(ctx.nodes[i], ctx.render.ch(ctx.render.ex_op1(ctx.nodes[i])), i)
 
@@ -264,7 +264,7 @@ def _return_by_ref(ctx: LiftContext, i: int, end: int) -> int:
 
 @opcode_handler(193)  # MATCH
 def _match_gettype(ctx: LiftContext, i: int, end: int) -> int:
-    # the corpus never lowers a real `match` — the wire's 193 sites are the
+    # no sample lowers a real `match` — the wire's 193 sites are the
     # encoder's gettype lowering (the res feeds a `== 'NULL'` check or a
     # `'type ' . $x` message): render the gettype expression
     return ctx.def_temp(

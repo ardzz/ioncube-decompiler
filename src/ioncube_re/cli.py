@@ -1,17 +1,13 @@
-"""argparse CLI: subcommands decrypt|key|component|stream|wire|lift —
-mirroring the frozen PHP CLIs (legacy-php/ic_decrypt.php, ic_stream.php, ic_wire.php,
-ic_lift.php). `uv run ioncube-re lift FILE`.
+"""argparse CLI: subcommands decrypt|key|component|stream|wire|lift.
+`uv run ioncube-re lift FILE`.
 
-Deviations from the PHP CLIs (documented):
-  - the PHP tools' leading-dash subcommands (ic_decrypt --verify, ic_stream
-    --verify / --verify-raw) are flag forms here: `decrypt --verify FILE REFS`,
+Conventions:
+  - the verify actions are flag forms: `decrypt --verify FILE REFS`,
     `stream verify FILE GLOB`, `stream verify-raw RAW SEED GLOB`;
-  - decrypt/stream/lift print a close-but-not-identical report format (the
-    artifacts are byte-exact; the wire subcommand's stdout is byte-identical
-    to the PHP oracle — the opline parity surface);
-  - the m5 auto-discovery root defaults to $IONCUBE_RE_M5_DIR, then the
-    workspace dumps root $IONCUBE_RE_WORKSPACE/work/dumps/m5 (the PHP tool
-    hardcodes __DIR__/../work/dumps/m5); override with --m5-dir.
+  - decrypt/stream/lift print a human-readable report (the artifacts they
+    write are byte-exact); `wire` prints the canonical opline report;
+  - the m5 auto-discovery root defaults to $IONCUBE_RE_M5_DIR, then
+    $IONCUBE_RE_WORKSPACE/work/dumps/m5; override with --m5-dir.
 """
 
 import argparse
@@ -384,7 +380,7 @@ def cmd_wire(a):
             with open(f, "rb") as fh:
                 w = fh.read()
         except OSError as e:
-            print(f"ic_wire: cannot read {f}", file=sys.stderr)
+            print(f"wire: cannot read {f}", file=sys.stderr)
             exit_code = 1
             continue
         desc = None
@@ -392,7 +388,7 @@ def cmd_wire(a):
             desc = parse_stream_desc(w)
             if desc is None:
                 print(
-                    f"ic_wire: {f}: no 1ea1e5ae ciphertext signature in the first "
+                    f"wire: {f}: no 1ea1e5ae ciphertext signature in the first "
                     f"0x4c+0x400 bytes — not a component stream?",
                     file=sys.stderr,
                 )
@@ -401,7 +397,7 @@ def cmd_wire(a):
             blob = w[desc["blob_off"] : desc["blob_off"] + desc["size"]]
             if len(blob) < desc["size"]:
                 print(
-                    f"ic_wire: {f}: blob truncated ({desc['size']} needed, "
+                    f"wire: {f}: blob truncated ({desc['size']} needed, "
                     f"{len(blob)} present)",
                     file=sys.stderr,
                 )
@@ -443,12 +439,12 @@ def cmd_wire(a):
                     desc=desc,
                 )
             except (WireError, OSError) as e:
-                print(f"ic_wire: {e}", file=sys.stderr)
+                print(f"wire: {e}", file=sys.stderr)
                 exit_code = 1
                 continue
             if sa is None or sb is None or erg is None:
                 print(
-                    f"ic_wire: {f}: --offline needs seeds (--seeds|--desc|--stream) "
+                    f"wire: {f}: --offline needs seeds (--seeds|--desc|--stream) "
                     f"and ierg (--ierg|--desc|--mainblob)",
                     file=sys.stderr,
                 )
@@ -456,7 +452,7 @@ def cmd_wire(a):
                 continue
             xo = xo if xo is not None else 2
             if len(w) < 0x34:
-                print(f"ic_wire: {f} too short for THR", file=sys.stderr)
+                print(f"wire: {f} too short for THR", file=sys.stderr)
                 exit_code = 1
                 continue
             thr0 = u32(w, 0x30)
@@ -492,7 +488,7 @@ def cmd_wire(a):
         try:
             r = parse_wire(w, kt, arena, fxoff)
         except WireError as e:
-            print(f"ic_wire: {f}: {e}", file=sys.stderr)
+            print(f"wire: {f}: {e}", file=sys.stderr)
             exit_code = 2
             continue
         for line in render_wire_report(r, os.path.basename(f)):
@@ -504,7 +500,7 @@ def cmd_wire(a):
                 with open(a.gt, "r") as fh:
                     gt_text = fh.read()
             except OSError:
-                print(f"ic_wire: cannot read {a.gt}", file=sys.stderr)
+                print(f"wire: cannot read {a.gt}", file=sys.stderr)
                 exit_code = 1
                 continue
             secs = gt_sections(gt_text)
@@ -567,7 +563,7 @@ def cmd_lift(a):
                 debug=a.debug,
             )
         except (PipelineError, StreamError, ValueError, OSError) as e:
-            print(f"ic_lift: {e}", file=sys.stderr)
+            print(f"lift: {e}", file=sys.stderr)
             raise SystemExit(VERIFY_FAIL)
         for line in r["stderr"]:
             print(line, file=sys.stderr)
@@ -592,7 +588,7 @@ def build_parser() -> argparse.ArgumentParser:
         "decrypt", help="eval chain: decrypt FILE (writes .mainblob/.cipher)"
     )
     d.add_argument("files", nargs="+")
-    d.add_argument("--out", default="ic_decrypted")
+    d.add_argument("--out", default="decrypted")
     d.add_argument(
         "--verify",
         action="store_true",
@@ -609,7 +605,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--key", default="eval")
     c.set_defaults(fn=cmd_component)
 
-    s = sub.add_parser("stream", help="frame codec + deflate (ic_stream)")
+    s = sub.add_parser("stream", help="frame codec + deflate")
     ss = s.add_subparsers(dest="cmd", required=True)
     for name, help_ in (
         ("decode", "encoded .php -> decoded stream"),
@@ -625,7 +621,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--chunk", type=int, default=None)
         sp.set_defaults(fn=cmd_stream)
 
-    w = sub.add_parser("wire", help="wire grammar walk + node assembly (ic_wire)")
+    w = sub.add_parser("wire", help="wire grammar walk + node assembly")
     w.add_argument("files", nargs="+")
     w.add_argument("--ktab")
     w.add_argument("--gt")
@@ -642,7 +638,7 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--ktab-out")
     w.set_defaults(fn=cmd_wire)
 
-    l = sub.add_parser("lift", help="decoded oplines -> readable PHP source (ic_lift)")
+    l = sub.add_parser("lift", help="decoded oplines -> readable PHP source")
     l.add_argument("files", nargs="+")
     l.add_argument("--chunk", type=int, default=1)
     l.add_argument("--arena")

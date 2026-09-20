@@ -1,10 +1,10 @@
-"""Container layer: eval "basic" container + production ICB0 chunks (ic_decrypt port).
+"""Container layer: eval "basic" container + production ICB0 chunks.
 
-Eval chain (M4): payload (custom b64) -> magic dispatch 0x4ff571b7 ->
+Eval chain: payload (custom b64) -> magic dispatch 0x4ff571b7 ->
 escdec 12-byte K -> len/seed -> pbl -> adler(a0=17) + MD4-fold verify ->
 rol3key -> X3_(5) keystream -> triple-XOR plaintext (the main blob).
 
-Production chain (M5-PROD): ICB0 prologue (per-PHP-version offset table) ->
+Production chain: ICB0 prologue (per-PHP-version offset table) ->
 '='-separated base64 chunks -> each chunk is its own basic container
 (magic 45bfa667, fixed 8-byte adler field) -> stream region.
 """
@@ -58,7 +58,9 @@ def decrypt_data(data: bytes, path: str = "<data>") -> dict:
         raise ValueError(f"implausible blob length {length}")
     cipher, postpbl = pbl_decode(payload, 28, length)
 
-    stored, adler_end = escdec(payload, postpbl, 4)  # escdec returns an absolute position
+    stored, adler_end = escdec(
+        payload, postpbl, 4
+    )  # escdec returns an absolute position
     computed = adler17(payload[4:postpbl])
     adler_ok = u32(stored, 0) == computed
 
@@ -106,7 +108,9 @@ def prod_chunks(path: str) -> tuple[list[tuple[int, int]], list[bytes]]:
     m = re.match(rb"^<\?php //ICB0 (.*?)\?>", l0)
     if not m:
         raise ValueError("no ICB0 prologue (not a production multi-version file?)")
-    fields = [(int(v), int(h, 16)) for v, h in re.findall(rb"(\d+):([0-9a-f]+)", m.group(1))]
+    fields = [
+        (int(v), int(h, 16)) for v, h in re.findall(rb"(\d+):([0-9a-f]+)", m.group(1))
+    ]
     i2 = l0.find(b"<?php //", 1)
     if i2 == -1:
         raise ValueError("cannot parse the version stub on line 0")
@@ -124,7 +128,9 @@ def prod_chunks(path: str) -> tuple[list[tuple[int, int]], list[bytes]]:
 def prod_container(c: bytes, label: str = "chunk") -> dict:
     """Parse one production chunk as a basic container (magic 45bfa667)."""
     if u32(c, 0) != MAGIC_BASIC:
-        raise ValueError(f"{label}: magic {u32(c, 0):08x} is not the basic container 45bfa667")
+        raise ValueError(
+            f"{label}: magic {u32(c, 0):08x} is not the basic container 45bfa667"
+        )
     K, _ = escdec(c, 4, 12)  # header is a fixed 24 raw bytes
     length = (((u32(K, 4) ^ 0x184FF593) + 0xF3DE98D2) & 0xFFFFFFFF) ^ u32(K, 8)
     seed = u32(K, 8)
@@ -146,7 +152,7 @@ def prod_container(c: bytes, label: str = "chunk") -> dict:
 
 
 def layer_a(cipher: bytes, seed: int) -> bytes:
-    """The eval decrypt core's triple-XOR, inline (M4 §3-5) — the chunk
+    """The eval decrypt core's triple-XOR, inline — the chunk
     main-blob decrypt for production files."""
     last16 = cipher[-16:]
     rol3 = rol3_key(last16)
@@ -169,7 +175,11 @@ def prod_blob_locate(stream: bytes) -> tuple[int, int, bytes, str] | None:
     """
     sig = blob_signature()
     size = u32(stream, 4)
-    if 16 < size <= len(stream) and u32(stream, 0x48) == size and stream[0x4C:0x50] == sig:
+    if (
+        16 < size <= len(stream)
+        and u32(stream, 0x48) == size
+        and stream[0x4C:0x50] == sig
+    ):
         return 0x4C, size, stream[0x4C : 0x4C + size], "conv"
     lim = min(len(stream), 0x400)
     for i in range(0, lim - 3):
@@ -180,10 +190,14 @@ def prod_blob_locate(stream: bytes) -> tuple[int, int, bytes, str] | None:
 
 def component_blob(stream: bytes) -> tuple[int, int, bytes]:
     """The eval-mode component locator: len word at 0x04, repeated at 0x48,
-    blob at 0x4c (all three captured wires agree; ic_stream.php)."""
+    blob at 0x4c (all three captured wires agree)."""
     size = u32(stream, 4)
     if size < 16 or 0x4C + size > len(stream):
-        raise ValueError(f"component locator: implausible size {size} for stream of {len(stream)} bytes")
+        raise ValueError(
+            f"component locator: implausible size {size} for stream of {len(stream)} bytes"
+        )
     if u32(stream, 0x48) != size:
-        raise ValueError("component locator: len word not repeated at 0x48 (layout changed?)")
+        raise ValueError(
+            "component locator: len word not repeated at 0x48 (layout changed?)"
+        )
     return 0x4C, size, stream[0x4C : 0x4C + size]

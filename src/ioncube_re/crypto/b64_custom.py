@@ -2,7 +2,7 @@
 
 Alphabet "0-9A-Za-z+/" (digits before letters — NOT the RFC 4648 order),
 6-bit accumulator, '=' skipped. Lines are taken after the `?>` close-tag
-line, whitespace-stripped. Byte-exact port of ic_decrypt.php payload_of().
+line, whitespace-stripped.
 """
 
 import base64
@@ -67,9 +67,8 @@ def chunk_split(data: bytes) -> list[bytes]:
     """Split an ICB0 production payload region into '='-separated chunks.
 
     The loader's base64 decoder stops at the first '=' (that is the chunk
-    separator); each chunk decodes independently. Port of prod_chunks() tail
-    (ic_stream.php): skip CR/LF, flush at '=' runs, stop at the first
-    non-alphabet byte.
+    separator); each chunk decodes independently. Skip CR/LF, flush at '='
+    runs, stop at the first non-alphabet byte.
 
     Fast path: the custom alphabet is a permutation of the standard one with
     identical 6-bit packing (4 chars -> 3 bytes, unpadded leftovers 2 -> 1 /

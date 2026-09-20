@@ -78,12 +78,12 @@ def record_seeds(
     stream: bytes, start: int, end: int, wire_size: int
 ) -> tuple[int, int] | None:
     """A sub-wire record's (seedA, seedB): the u32 wire-size word followed by 8
-    seed bytes (M6-KEYTAB).
+    seed bytes.
 
     A region can contain a coincidental u32 == wire_size (junk, inlined
     literals, earlier wire tails), so the first match is not necessarily the
     record. The real record carries the eval-record marker 0x01 at +0x15
-    (M6-SUBWIRE §3's [byte 01 @+0x15], byte-verified on healthy records);
+    (byte-verified on healthy records);
     prefer the closest match that has it, else fall back to the closest."""
     best: tuple[int, int, int] | None = None  # (priority, -distance, i)
     i = start

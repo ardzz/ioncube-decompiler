@@ -94,7 +94,7 @@ def run_php(args, cwd=WORKSPACE, timeout=300):
 def php_intermediate_harness(tmpdir) -> str:
     """Write (and return) the /tmp PHP harness that loads ic_stream.php's
     library body (the ic_lift loader pattern: eval up to the CLI marker) and
-    dumps frame_decode's intermediate — the byte-exact intermediate oracle.
+    dumps frame_decode's intermediate — the byte-exact intermediate reference.
 
     The eval'd body resolves its ic_decrypt.php dependency through __DIR__,
     so a read-only copy of that file is placed next to the harness. Everything

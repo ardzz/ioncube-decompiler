@@ -4,9 +4,8 @@ anti-tamper ungarble, the jump-target calibration, the +4 VAR-read slot
 shifts, the temp def/use registration, the try/catch records and the pool
 string resolution. Model.py owns the dataclasses; this module derives.
 
-The +2 anti-tamper garble table lives HERE (M6-SUBWIRE §7.5 + the
-SWITCH_LONG/SWITCH_STRING pair extension, HANDLERS-PORT §1) — one place,
-citing its derivation.
+The +2 anti-tamper garble table lives HERE — one place, citing its
+derivation.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from __future__ import annotations
 from ..container import i32, u32
 from ..wire import WireReader
 
-# jump-target-calibrated opcodes (M5C-LIFTER §1.2: target = entry_value - 1)
+# jump-target-calibrated opcodes (target = entry_value - 1)
 _JT_OPS = frozenset({42, 43, 44, 46, 47, 48, 152, 169, 185, 186, 193, 194, 196})
 _SKIPUSE = frozenset(
     {
@@ -98,14 +97,13 @@ def _resolve_opcodes(ctx) -> None:
 
 def _unused(n: Node, wname: str) -> bool:
     e = n.ent.get(wname)
-    # the unused marker: 0xFFFFFFFF on the CE generation, bare 0
-    # on the Blesta generation's chunk-1 wires (license.php load
-    # n52: Loader::loadModels($this, ...) arrives as 184/e0/e0)
+    # the unused marker: 0xFFFFFFFF on one encoder generation, bare 0
+    # on another's chunk-1 wires
     return e is None or (e.kind == 0 and e.raw in (0, 0xFFFFFFFF))
 
 
 def _ungarble(ctx) -> None:
-    """The +2 anti-tamper garble (M6-SUBWIRE §7.5 + the switch pair).
+    """The +2 anti-tamper garble.
 
     The encoder stores four opcodes +2: FETCH_THIS(182) as
     ISSET_ISEMPTY_THIS(184) [res-only $this form; op1/op2 carry the
@@ -114,8 +112,8 @@ def _ungarble(ctx) -> None:
     SWITCH_LONG's op2 is a jumptable], SWITCH_LONG(185) as IN_ARRAY(187)
     and SWITCH_STRING(186) as COUNT(188) [both res unused with a const
     serialized jumptable in op2 — a real IN_ARRAY/COUNT always carries
-    a res temp]. The first two match ic_lift.php verbatim; the switch
-    pair extends the same +2 family (HANDLERS-PORT §1)."""
+    a res temp]. The first two match the reference lifter; the switch
+    pair extends the same +2 family."""
 
     for n in ctx.nodes:
         f = ctx.op[n.i]
@@ -150,7 +148,7 @@ def _alias_149(ctx) -> None:
     node"; a genuine 149 landing pad has no operand payload). The four
     shapes below are the ones whose successor contract makes the true op
     unambiguous; the value-op aliases (IS_EQUAL, read-side FETCH_OBJ_R,
-    ASSIGN...) stay 149 and degrade like the reference oracle."""
+    ASSIGN...) stay 149 and degrade like the reference lifter."""
     import re
 
     from .operand import zval_name
@@ -265,7 +263,7 @@ def _alias_149(ctx) -> None:
             ctx.op[n.i] = 60
 
 
-# ---- jump-target calibration (M5C-LIFTER §1.2) ----
+# ---- jump-target calibration ----
 
 
 def _calibrate_jumps(ctx) -> None:
@@ -277,7 +275,7 @@ def _calibrate_jumps(ctx) -> None:
             f == 42 and n.ent.get("op1") or f != 42 and n.ent.get("op2")
         ):
             v = (n.ent["op1"] if f == 42 else n.ent["op2"]).raw
-            t = v - 1  # entry v = target+1 (M6 §1.3)
+            t = v - 1  # entry v = target+1
             if t == n.i or t < 0 or t >= ctx.thr:
                 # the off-by-one family: a dead-code JMP after RETURN
                 # targets the next node (v); the mid-RETURN form targets
@@ -298,16 +296,16 @@ def _calibrate_jumps(ctx) -> None:
             ctx.dw_edges[ctx.jt[n.i]] = n.i  # do-while back-edge candidates
 
 
-# ---- the +4 VAR-read normalization (M6-SUBWIRE §7.4) ----
+# ---- the +4 VAR-read normalization ----
 
 
 def _shift_var_reads(ctx) -> None:
-    """The Blesta generation encodes a VAR read of a call/NEW result 4
+    """One encoder generation encodes a VAR read of a call/NEW result 4
     slots above the producer's res slot (V26 = DO_FCALL res; ASSIGN op2
     = V30): the read's own slot has no def at/before the node, slot-4
     is defined by a DO_FCALL/NEW before it. Normalize those reads to
     slot-4 so the temp def/use analysis and the expression inlining
-    line up (the eval corpus never hit the pattern)."""
+    line up (eval-generation files never hit the pattern)."""
     defs: dict[int, int] = {}
     for n in ctx.nodes:
         e = n.ent.get("res")

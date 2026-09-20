@@ -2,16 +2,15 @@
 call argument runs (INIT_FCALL..DO_FCALL), object construction (NEW..DO),
 and array literals (INIT_ARRAY + ADD_ARRAY_ELEMENT runs).
 
-Ported from the emitter's PHP-first fixed shape (M6-SUBWIRE §7.6): argument
-expressions between the SENDs render in place through the full statement
-dispatcher (call args legally contain the ternary lowering, inline ASSIGN,
-POST_INC); nested INIT/NEW/INIT_ARRAY recurse; ``consumed``/``acct`` keep
-the accounting single-counted.
+Argument expressions between the SENDs render in place through the full
+statement dispatcher (call args legally contain the ternary lowering, inline
+ASSIGN, POST_INC); nested INIT/NEW/INIT_ARRAY recurse; ``consumed``/``acct``
+keep the accounting single-counted.
 
 The DO node is the walk's exact stopping point — never behind a real
 statement (a forward scan here swallowed the NEXT call's DO when an
 argument expression interrupted the SEND run). THIS is the one place that
-rule lives (M6-SUBWIRE §7.6).
+rule lives.
 """
 
 from __future__ import annotations

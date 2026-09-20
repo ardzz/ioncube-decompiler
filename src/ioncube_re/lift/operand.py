@@ -14,11 +14,13 @@ dawwinci 3-slot fallback is a different, 32-bit ABI, DAWWINCI-DIFF §4.3).
 from __future__ import annotations
 
 import re
+import struct
 
 from ..interned import CONSTANT_TOKENS, interned_name, render_placeholder
 from ..serarr import decode_serarr, php_array_literal
 
 from .model import LiftContext, Node
+
 
 def php_quote(s: bytes) -> str:
     t = s.decode("latin-1")
@@ -33,7 +35,22 @@ def zval_php(z: dict, idx: int) -> str:
     """A zval as a PHP expression (icl_zval_php port + interned resolution)."""
     t = z["type"] & 0xFF
     if t == 4:
+        if z.get("b"):
+            # 64-bit IS_LONG (the wire carries low/high words): sign-extend
+            # (gdiverse4 -3 = {a:0xFFFFFFFD, b:0xFFFFFFFF}). b==0 keeps the
+            # u32 view — the PHP oracle print and ClientExec's 0xFFFFFFFF
+            # sentinel both rely on it.
+            v = ((z["b"] & 0xFFFFFFFF) << 32) | (z["a"] & 0xFFFFFFFF)
+            if v >= 1 << 63:
+                v -= 1 << 64
+            return str(v)
         return str(z["a"])  # int (u32 view — matches the PHP oracle print)
+    if t == 5:
+        # IS_DOUBLE: the 64-bit value lives in the low/high words
+        d = struct.unpack(
+            "<d", struct.pack("<II", z["a"] & 0xFFFFFFFF, z["b"] & 0xFFFFFFFF)
+        )[0]
+        return repr(d)
     if t == 1:
         return "null"
     if t == 2:
@@ -60,14 +77,20 @@ def zval_php(z: dict, idx: int) -> str:
             pairs = decode_serarr(z["str"])
             if pairs is not None:
                 return php_array_literal(pairs)
-            # parse failed: fall back to the string-scrape (M6 §7.7)
+            # parse failed: fall back to the string-scrape (M6 §7.7) —
+            # `s<len>'<bytes>` with no closing quote: the value starts
+            # right at the match end
             items = []
             for m in re.finditer(rb"s(\d+)'", z["str"]):
                 ln = int(m.group(1))
-                start = m.end() + 2  # skip the opening quote delimiters
+                start = m.end()  # the payload follows the opening quote
                 if start < len(z["str"]):
                     items.append(php_quote(z["str"][start : start + ln]))
-            return "[%s/* +ser */]" % ", ".join(items) if items else f"[/* serialized array {idx} */]"
+            return (
+                "[%s/* +ser */]" % ", ".join(items)
+                if items
+                else f"[/* serialized array {idx} */]"
+            )
         return f"[/* serialized array {idx} */]"
     return f"/*zval{idx} t={t}*/"
 
@@ -88,6 +111,27 @@ def bare(e: str) -> str:
     if len(e) >= 2 and e[0] in "'\"" and e[-1] == e[0]:
         return e[1:-1]
     return e
+
+
+_IDENT_RE = re.compile(r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$")
+
+
+def prop_txt(e: str) -> str:
+    """The text after `->`: a bare identifier for valid property names,
+    a `$var` for dynamic fetches, `{'0'}`-curly for the rest (numeric or
+    punctuation names are invalid bare: `$q->fetch()->0`)."""
+    inner = bare(e)
+    if inner.startswith("$"):
+        # a simple `$var` renders bare; a compound dynamic name
+        # (`$options . '_url'`) needs the curly form
+        if re.fullmatch(r"\$[A-Za-z_][A-Za-z0-9_]*", inner):
+            return inner
+        return "{" + e + "}"
+    if _IDENT_RE.match(inner):
+        return inner
+    if e[:1] in "'\"" and e[-1:] == e[:1]:
+        return "{" + e + "}"
+    return "{'" + inner.replace("\\", "\\\\").replace("'", "\\'") + "'}"
 
 
 def unwrap(e: str) -> str:
@@ -121,9 +165,49 @@ def concat_pair(a: str, b: str) -> str:
     return f"{a} . {b}"
 
 
+_ZEND_TYPES = {
+    # bit index -> is_* check (single-bit) and gettype() name (multi-bit)
+    1: ("is_null", "NULL"),  # IS_NULL
+    2: ("is_bool", "boolean"),  # IS_FALSE
+    3: ("is_bool", "boolean"),  # IS_TRUE
+    4: ("is_int", "integer"),  # IS_LONG
+    5: ("is_float", "double"),  # IS_DOUBLE
+    6: ("is_string", "string"),  # IS_STRING
+    7: ("is_array", "array"),  # IS_ARRAY
+    8: ("is_object", "object"),  # IS_OBJECT
+    9: ("is_resource", "resource"),  # IS_RESOURCE
+}
+
+
+def typecheck_bits(ext: int) -> str:
+    """A TYPE_CHECK (op 123) ext: small values (<= 15) are the plain zend
+    type enum (is_long etc.); larger values are the 1<<type BITMASK the
+    encoder emits for compiled type checks (64 = IS_STRING, 128 = IS_ARRAY
+    on the corpus)."""
+    if ext <= 15:
+        return cast_name(ext)
+    bits = [b for b in _ZEND_TYPES if ext & (1 << b)]
+    if len(bits) == 1:
+        return _ZEND_TYPES[bits[0]][0]
+    if len(bits) > 1:
+        names = ", ".join("'" + _ZEND_TYPES[b][1] + "'" for b in bits)
+        return f"in_array(gettype($x), [{names}], true) "
+    return f"type{ext}"
+
+
 def cast_name(ext: int) -> str:
-    m = {1: "is_null", 2: "is_bool", 3: "is_long", 4: "int", 5: "float", 6: "string",
-         7: "array", 8: "is_null", 10: "object"}
+    """A CAST (op 51) ext is the plain zend type enum."""
+    m = {
+        1: "is_null",
+        2: "is_bool",
+        3: "is_long",
+        4: "int",
+        5: "float",
+        6: "string",
+        7: "array",
+        8: "is_null",
+        10: "object",
+    }
     return m.get(ext, f"type{ext}")
 
 
@@ -187,10 +271,17 @@ class OperandRenderer:
                 pairs = decode_serarr(z["str"]) if "str" in z else None
                 if pairs is not None:
                     return "array(" + php_array_literal(pairs) + ")"
-                return "array(" + (z["str"][:40].decode("latin-1") + "..." if "str" in z else "ser") + ")"
+                return (
+                    "array("
+                    + (z["str"][:40].decode("latin-1") + "..." if "str" in z else "ser")
+                    + ")"
+                )
             if "str" in z:
-                return ("string(" + php_quote(z["str"]) + ")" if tt == 6
-                        else "class(" + php_quote(z["str"]) + ")")
+                return (
+                    "string(" + php_quote(z["str"]) + ")"
+                    if tt == 6
+                    else "class(" + php_quote(z["str"]) + ")"
+                )
             if "off" in z:
                 signed = z["off"] - 0x100000000 if z["off"] > 0x7FFFFFFF else z["off"]
                 return f"interned-{-signed}(len {z.get('len', 0)})"
@@ -207,20 +298,41 @@ class OperandRenderer:
         # receiver renders as a $CV/$T expression, never bare digits
         if e.isdigit():
             return "$this"
+        # a bare word receiver (the wire's `view` style name operand) is a
+        # local variable: a receiver must be a $-expression or (...) — the
+        # bare form is a parse error
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", e):
+            return "$" + e
         return e
 
-    def callee_name(self, n: Node, which: str) -> str:
+    def callee_name(self, n: Node, which: str) -> str | None:
         e = n.ent.get(which)
         if e is None:
-            return "?"
+            return None
         if e.kind == 1 and e.raw < len(self.ctx.zvals):
             nm = zval_name(self.ctx.zvals[e.raw])  # pool string OR interned name
             if nm is not None:
                 return nm
-        return self.ch(self.ex(n, which))
+        # a type-0 operand beyond the sentinels is a heap pointer (the
+        # encoder stores interned method names by address: TaxRule ctor
+        # op2 raw=3408161000 across chunks) — the name is not recoverable
+        text = self.ex(n, which)
+        if (
+            text is None
+            or text.isdigit()
+            or not re.match(r"^[A-Za-z_\\][A-Za-z0-9_\\]*$", text)
+        ):
+            return None
+        return text
 
 
 __all__ = [
-    "OperandRenderer", "bare", "cast_name", "concat_pair", "php_quote",
-    "unwrap", "zval_name", "zval_php",
+    "OperandRenderer",
+    "bare",
+    "cast_name",
+    "concat_pair",
+    "php_quote",
+    "unwrap",
+    "zval_name",
+    "zval_php",
 ]

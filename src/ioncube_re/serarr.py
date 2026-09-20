@@ -64,7 +64,7 @@ class _SerarrParser:
             self._p += 1
         if self._p == start:
             raise ValueError(f"expected digits at pos {self._p}")
-        return int(self._d[start:self._p])
+        return int(self._d[start : self._p])
 
     def _read_until_semi(self) -> str:
         start = self._p
@@ -72,7 +72,7 @@ class _SerarrParser:
             self._p += 1
         if self._p >= len(self._d):
             raise ValueError(f"expected ';' at pos {self._p}")
-        v = self._d[start:self._p].decode("ascii")
+        v = self._d[start : self._p].decode("ascii")
         self._p += 1
         return v
 
@@ -81,7 +81,7 @@ class _SerarrParser:
             self._read_until_semi()
 
     def _read_n_bytes(self, n: int) -> bytes:
-        chunk = self._d[self._p:self._p + n]
+        chunk = self._d[self._p : self._p + n]
         if len(chunk) < n:
             raise ValueError("truncated payload")
         self._p += n
@@ -147,13 +147,24 @@ class _SerarrParser:
             return float(self._read_until_semi()), 2
         if ch == "b":
             return bool(int(self._read_until_semi())), 2
+        if ch == "n":
+            # the production encoder's null/bool scalars: a bare type char
+            # followed by the 2 metadata fields (no payload digits) —
+            # dawwinci's eval-generation blobs never carry these
+            return None, 2
+        if ch == "t":
+            return True, 2
+        if ch == "f":
+            return False, 2
         if ch == "[":
             self._p -= 1  # put '[' back; read_array() consumes it
             return self.read_array(), 0
         raise ValueError(f"unknown value type {ch!r} at pos {self._p - 1}")
 
 
-def decode_serarr(data: bytes, exact: bool = False) -> list[tuple[int | str, object]] | None:
+def decode_serarr(
+    data: bytes, exact: bool = False
+) -> list[tuple[int | str, object]] | None:
     """Parse an ionCube serialized-array blob into a list of (key, value)
     pairs (keys int/str; values int/float/str/bool or a nested pair list),
     or None if the data does not parse. `exact` additionally requires the
@@ -193,6 +204,8 @@ def php_value(v: object) -> str:
         return php_array_literal(v)
     if isinstance(v, bool):
         return "true" if v else "false"
+    if v is None:
+        return "null"
     if isinstance(v, str):
         return _php_quote_str(v)
     return str(v)

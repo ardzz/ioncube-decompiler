@@ -78,26 +78,43 @@ def cmd_decrypt(a):
         print(f"  key K           {r['key_hex']} (escdec of 24-byte header)")
         print(f"  blob len        {r['len']}   seed  0x{r['seed']:08x}")
         print(f"  raw region      {r['raw_region']} (adler scope)")
-        print(f"  adler(a0=17)    computed 0x{r['adler_computed']:08x}  "
-              f"stored 0x{r['adler_stored']:08x}  {'OK' if r['adler_ok'] else 'FAIL'}")
+        print(
+            f"  adler(a0=17)    computed 0x{r['adler_computed']:08x}  "
+            f"stored 0x{r['adler_stored']:08x}  {'OK' if r['adler_ok'] else 'FAIL'}"
+        )
         print(f"  rol3key         {r['rol3key'].hex().upper()}")
-        print(f"  keystream       X3_(5) CMWC-hybrid seeded 0x{r['seed']:08x}, "
-              f"{r['len'] - 16} bytes")
-        print(f"  MD4 fold        {r['md4_fold']} (want 120)  "
-              f"{'OK' if r['md4_fold'] == 120 else 'FAIL'}")
+        print(
+            f"  keystream       X3_(5) CMWC-hybrid seeded 0x{r['seed']:08x}, "
+            f"{r['len'] - 16} bytes"
+        )
+        print(
+            f"  MD4 fold        {r['md4_fold']} (want 120)  "
+            f"{'OK' if r['md4_fold'] == 120 else 'FAIL'}"
+        )
         off, end = r["stream_region"]
-        print(f"  stream seed     0x{r['stream_seed']:08x}   reseed 0x{r['reseed']:08x}   "
-              f"region payload[{off}..{end})")
-        base = re.sub(r"[^a-z0-9]+", "_", os.path.basename(f)[:-4] or os.path.basename(f), flags=re.I)
+        print(
+            f"  stream seed     0x{r['stream_seed']:08x}   reseed 0x{r['reseed']:08x}   "
+            f"region payload[{off}..{end})"
+        )
+        base = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            os.path.basename(f)[:-4] or os.path.basename(f),
+            flags=re.I,
+        )
         pf = f"{out_prefix}.{base}.mainblob.bin"
         with open(pf, "wb") as fh:
             fh.write(r["plain"])
         cf = f"{out_prefix}.{base}.cipher.bin"
         with open(cf, "wb") as fh:
             fh.write(r["cipher"])
-        print(f"  wrote           {pf} ({len(r['plain'])} B decrypted), "
-              f"{cf} ({len(r['cipher'])} B ciphertext)")
-        print(f"  VERDICT         {'DECRYPTED+VERIFIED' if r['ok'] else 'VERIFICATION FAILED'}")
+        print(
+            f"  wrote           {pf} ({len(r['plain'])} B decrypted), "
+            f"{cf} ({len(r['cipher'])} B ciphertext)"
+        )
+        print(
+            f"  VERDICT         {'DECRYPTED+VERIFIED' if r['ok'] else 'VERIFICATION FAILED'}"
+        )
         if not r["ok"]:
             raise SystemExit(VERIFY_FAIL)
     return 0
@@ -129,18 +146,24 @@ def _decrypt_verify(a):
         mism = sum(1 for i in range(n) if plain[i] != dump[i])
         first = next((i for i in range(n) if plain[i] != dump[i]), -1)
         if mism == 0 and len(dump) >= len(plain):
-            print(f"VERIFY {os.path.basename(f)}: {len(plain)}/{len(plain)} bytes MATCH (dump {ref})")
+            print(
+                f"VERIFY {os.path.basename(f)}: {len(plain)}/{len(plain)} bytes MATCH (dump {ref})"
+            )
             ok = True
         else:
-            print(f"VERIFY {os.path.basename(f)} vs {ref}: {n - mism}/{n} match, "
-                  f"first mismatch at {first}")
+            print(
+                f"VERIFY {os.path.basename(f)} vs {ref}: {n - mism}/{n} match, "
+                f"first mismatch at {first}"
+            )
             full = bytearray(r["cipher"])
             full[: len(plain)] = plain
             n2 = min(len(dump), len(full))
             mism2 = sum(1 for i in range(n2) if full[i] != dump[i])
             if mism2 == 0 and len(dump) == len(full):
-                print(f"VERIFY {os.path.basename(f)}: FULL in-place buffer "
-                      f"(plain+rol3 tail) {n2}/{n2} bytes MATCH")
+                print(
+                    f"VERIFY {os.path.basename(f)}: FULL in-place buffer "
+                    f"(plain+rol3 tail) {n2}/{n2} bytes MATCH"
+                )
                 ok = True
     if not tried:
         _die("no readable reference dumps")
@@ -155,10 +178,20 @@ def cmd_key(a):
             r = decrypt_file(f)
         except (ValueError, OSError) as e:
             _die(str(e))
-        print("%-24s K=%s len=%d seed=0x%08x streamseed=0x%08x reseed=0x%08x "
-              "adler=0x%08x md4fold=%s"
-              % (os.path.basename(f), r["key_hex"], r["len"], r["seed"],
-                 r["stream_seed"], r["reseed"], r["adler_computed"], r["md4_fold"]))
+        print(
+            "%-24s K=%s len=%d seed=0x%08x streamseed=0x%08x reseed=0x%08x "
+            "adler=0x%08x md4fold=%s"
+            % (
+                os.path.basename(f),
+                r["key_hex"],
+                r["len"],
+                r["seed"],
+                r["stream_seed"],
+                r["reseed"],
+                r["adler_computed"],
+                r["md4_fold"],
+            )
+        )
     return 0
 
 
@@ -175,8 +208,10 @@ def cmd_component(a):
     out = re.sub(r"\.[^.]*$", "", a.cipherfile) + ".dec.bin"
     with open(out, "wb") as fh:
         fh.write(plain)
-    print(f"component decrypt: {len(cipher)} B cipher -> {len(plain)} B plain "
-          f"(key {key.hex().upper()}) -> {out}")
+    print(
+        f"component decrypt: {len(cipher)} B cipher -> {len(plain)} B plain "
+        f"(key {key.hex().upper()}) -> {out}"
+    )
     for needle in (b"AAAA_marker", b"hello", b"who", b"hi "):
         if needle in plain:
             print(f"  literal visible: {needle.decode()}")
@@ -192,9 +227,11 @@ def cmd_stream(a) -> int:
             r = stream_of_file(a.files[0])
         except (StreamError, ValueError, OSError) as e:
             _die(str(e))
-        print(f"{a.files[0]}: region @payload+{r['region_off']} ({len(r['raw'])} B), "
-              f"seed 0x{r['seed']:08x}, {r['frames']} frames, {r['checkpoints']} adler "
-              f"checkpoints OK, intermediate {len(r['inter'])} B -> stream {len(r['stream'])} B")
+        print(
+            f"{a.files[0]}: region @payload+{r['region_off']} ({len(r['raw'])} B), "
+            f"seed 0x{r['seed']:08x}, {r['frames']} frames, {r['checkpoints']} adler "
+            f"checkpoints OK, intermediate {len(r['inter'])} B -> stream {len(r['stream'])} B"
+        )
         out = a.out or re.sub(r"\.php$", "", a.files[0], flags=re.I) + ".stream.bin"
         with open(out, "wb") as fh:
             fh.write(r["stream"])
@@ -207,9 +244,11 @@ def cmd_stream(a) -> int:
             r = decode_raw(raw, int(a.files[1], 16))
         except (StreamError, ValueError, OSError) as e:
             _die(str(e))
-        print(f"{a.files[0]}: {len(raw)} B raw, seed 0x{r['seed']:08x}, {r['frames']} frames, "
-              f"{r['checkpoints']} adler checkpoints OK, intermediate {len(r['inter'])} B "
-              f"-> stream {len(r['stream'])} B")
+        print(
+            f"{a.files[0]}: {len(raw)} B raw, seed 0x{r['seed']:08x}, {r['frames']} frames, "
+            f"{r['checkpoints']} adler checkpoints OK, intermediate {len(r['inter'])} B "
+            f"-> stream {len(r['stream'])} B"
+        )
         out = a.out or re.sub(r"\.[^.]*$", "", a.files[0]) + ".stream.bin"
         with open(out, "wb") as fh:
             fh.write(r["stream"])
@@ -227,8 +266,10 @@ def cmd_stream(a) -> int:
         ccp = f"{stem}.cc.bin"
         with open(ccp, "wb") as fh:
             fh.write(blob)
-        print(f"{a.files[0]}: stream {len(r['stream'])} B, component ciphertext at "
-              f"[0x{coff:x}..0x{coff + size:x}) ({size} B) -> {ccp}")
+        print(
+            f"{a.files[0]}: stream {len(r['stream'])} B, component ciphertext at "
+            f"[0x{coff:x}..0x{coff + size:x}) ({size} B) -> {ccp}"
+        )
         plain = component_decrypt(blob, EVAL_KEY)
         cpp = f"{stem}.cplain.bin"
         with open(cpp, "wb") as fh:
@@ -253,20 +294,29 @@ def cmd_stream(a) -> int:
         for c in r["chunks"]:
             n = c["num"]
             ad = "OK" if c["adler_ok"] else "**FAIL**"
-            blob = (f"{c['blob_method']}@0x{c['blob_off']:x} {len(c['blob'])} B"
-                    if "blob" in c else "NOT FOUND")
-            print(f"  chunk{n}: {c['region_off'] + c['region_len']} B container, "
-                  f"len={c['len']} seed=0x{c['seed']:08x}, adler {ad}, "
-                  f"SEED=0x{c['stream_seed']:08x} RESEED=0x{c['reseed']:08x}")
-            print(f"    region [{c['region_off']}..{c['region_off'] + c['region_len']}): "
-                  f"{c['frames']} frames, {c['ckpts']} adler checkpoints OK, "
-                  f"intermediate {len(c['inter'])} B -> stream {len(c['stream'])} B "
-                  f"(gzinflate OK)")
+            blob = (
+                f"{c['blob_method']}@0x{c['blob_off']:x} {len(c['blob'])} B"
+                if "blob" in c
+                else "NOT FOUND"
+            )
+            print(
+                f"  chunk{n}: {c['region_off'] + c['region_len']} B container, "
+                f"len={c['len']} seed=0x{c['seed']:08x}, adler {ad}, "
+                f"SEED=0x{c['stream_seed']:08x} RESEED=0x{c['reseed']:08x}"
+            )
+            print(
+                f"    region [{c['region_off']}..{c['region_off'] + c['region_len']}): "
+                f"{c['frames']} frames, {c['ckpts']} adler checkpoints OK, "
+                f"intermediate {len(c['inter'])} B -> stream {len(c['stream'])} B "
+                f"(gzinflate OK)"
+            )
             print(f"    component ciphertext {blob}", end="")
             if "plain" in c:
                 lits = re.findall(rb"[\x20-\x7e]{4,}", c["plain"])[:6]
                 print(f" -> layer-B decrypt (eval key): {len(c['plain'])} B plain")
-                print(f"       literals: {' | '.join(l.decode('latin-1') for l in lits)}")
+                print(
+                    f"       literals: {' | '.join(l.decode('latin-1') for l in lits)}"
+                )
             else:
                 print()
                 allok = False
@@ -286,8 +336,10 @@ def cmd_stream(a) -> int:
             r = stream_of_file(a.files[0])
         except (StreamError, ValueError, OSError) as e:
             _die(str(e))
-        print(f"{a.files[0]}: intermediate {len(r['inter'])} B (adler {r['frame_adler']}, "
-              f"{r['checkpoints']} checkpoints OK) -> stream {len(r['stream'])} B")
+        print(
+            f"{a.files[0]}: intermediate {len(r['inter'])} B (adler {r['frame_adler']}, "
+            f"{r['checkpoints']} checkpoints OK) -> stream {len(r['stream'])} B"
+        )
         files = sorted(glob(a.files[1])) if a.files[1] else []
         if not files:
             _die(f"no files match {a.files[1]}")
@@ -301,8 +353,10 @@ def cmd_stream(a) -> int:
             r = decode_raw(raw, int(a.files[1], 16))
         except (StreamError, ValueError, OSError) as e:
             _die(str(e))
-        print(f"{a.files[0]}: {len(raw)} B raw, seed 0x{r['seed']:08x}, "
-              f"{r['checkpoints']} adler checkpoints OK -> stream {len(r['stream'])} B")
+        print(
+            f"{a.files[0]}: {len(raw)} B raw, seed 0x{r['seed']:08x}, "
+            f"{r['checkpoints']} adler checkpoints OK -> stream {len(r['stream'])} B"
+        )
         files = sorted(glob(a.files[2])) if len(a.files) > 2 else []
         if not files:
             _die(f"no files match {a.files[2]}")
@@ -317,8 +371,10 @@ def cmd_stream(a) -> int:
 
 def cmd_wire(a):
     if not a.files:
-        _die("usage: ioncube-re wire [--ktab K] [--gt gt.txt [--gtsec SEC]] [--arena A] "
-             "[--component] [--stream] [--offline] FILE...")
+        _die(
+            "usage: ioncube-re wire [--ktab K] [--gt gt.txt [--gtsec SEC]] [--arena A] "
+            "[--component] [--stream] [--offline] FILE..."
+        )
     if a.offline and a.ktab:
         _die("--offline and --ktab are exclusive")
     exit_code = 0
@@ -335,23 +391,37 @@ def cmd_wire(a):
         if a.stream:
             desc = parse_stream_desc(w)
             if desc is None:
-                print(f"ic_wire: {f}: no 1ea1e5ae ciphertext signature in the first "
-                      f"0x4c+0x400 bytes — not a component stream?", file=sys.stderr)
+                print(
+                    f"ic_wire: {f}: no 1ea1e5ae ciphertext signature in the first "
+                    f"0x4c+0x400 bytes — not a component stream?",
+                    file=sys.stderr,
+                )
                 exit_code = 2
                 continue
             blob = w[desc["blob_off"] : desc["blob_off"] + desc["size"]]
             if len(blob) < desc["size"]:
-                print(f"ic_wire: {f}: blob truncated ({desc['size']} needed, "
-                      f"{len(blob)} present)", file=sys.stderr)
+                print(
+                    f"ic_wire: {f}: blob truncated ({desc['size']} needed, "
+                    f"{len(blob)} present)",
+                    file=sys.stderr,
+                )
                 exit_code = 2
                 continue
             w = component_decrypt(blob, EVAL_KEY)
-            _out_bytes("   stream-desc: size=%d seedA=%08x seedB=%08x blob@0x%x "
-                       "(pred 0x%x %s) tail=%d strings=[%s]\n"
-                       % (desc["size"], desc["seedA"], desc["seedB"], desc["blob_off"],
-                          desc["pred"], "OK" if desc["blob_off"] == desc["pred"] else "DIFF",
-                          desc["tail"],
-                          ",".join('"%s"' % s.decode("latin-1") for s in desc["strings"])))
+            _out_bytes(
+                "   stream-desc: size=%d seedA=%08x seedB=%08x blob@0x%x "
+                "(pred 0x%x %s) tail=%d strings=[%s]\n"
+                % (
+                    desc["size"],
+                    desc["seedA"],
+                    desc["seedB"],
+                    desc["blob_off"],
+                    desc["pred"],
+                    "OK" if desc["blob_off"] == desc["pred"] else "DIFF",
+                    desc["tail"],
+                    ",".join('"%s"' % s.decode("latin-1") for s in desc["strings"]),
+                )
+            )
         if a.component:
             w = component_decrypt(w, EVAL_KEY)
         kt = None
@@ -365,16 +435,23 @@ def cmd_wire(a):
         if a.offline:
             try:
                 sa, sb, erg, xo = offline_params(
-                    seeds=a.seeds, desc_file=a.desc, mainblob_file=a.mainblob,
+                    seeds=a.seeds,
+                    desc_file=a.desc,
+                    mainblob_file=a.mainblob,
                     ierg=(int(a.ierg, 0) if a.ierg else None),
-                    x=(int(a.x, 0) if a.x else None), desc=desc)
+                    x=(int(a.x, 0) if a.x else None),
+                    desc=desc,
+                )
             except (WireError, OSError) as e:
                 print(f"ic_wire: {e}", file=sys.stderr)
                 exit_code = 1
                 continue
             if sa is None or sb is None or erg is None:
-                print(f"ic_wire: {f}: --offline needs seeds (--seeds|--desc|--stream) "
-                      f"and ierg (--ierg|--desc|--mainblob)", file=sys.stderr)
+                print(
+                    f"ic_wire: {f}: --offline needs seeds (--seeds|--desc|--stream) "
+                    f"and ierg (--ierg|--desc|--mainblob)",
+                    file=sys.stderr,
+                )
                 exit_code = 1
                 continue
             xo = xo if xo is not None else 2
@@ -385,8 +462,10 @@ def cmd_wire(a):
             thr0 = u32(w, 0x30)
             kt = kt_generate(sa, sb, erg, thr0)
             fxoff = xo
-            _out_bytes("   offline-ktab: seeds=(0x%08x,0x%08x) ierg=0x%08x thr=%d x=%d "
-                       "-> %d bytes\n" % (sa, sb, erg, thr0, fxoff, len(kt)))
+            _out_bytes(
+                "   offline-ktab: seeds=(0x%08x,0x%08x) ierg=0x%08x thr=%d x=%d "
+                "-> %d bytes\n" % (sa, sb, erg, thr0, fxoff, len(kt))
+            )
             if a.ktab_out:
                 with open(a.ktab_out, "wb") as fh:
                     fh.write(kt)
@@ -398,8 +477,13 @@ def cmd_wire(a):
                 if kt is None:
                     m = re.search(r"arena_(\d+)", os.path.basename(a.arena))
                     if m:
-                        g = sorted(glob(os.path.join(os.path.dirname(a.arena),
-                                                     f"ktab_{m.group(1)}_*")))
+                        g = sorted(
+                            glob(
+                                os.path.join(
+                                    os.path.dirname(a.arena), f"ktab_{m.group(1)}_*"
+                                )
+                            )
+                        )
                         if g:
                             with open(g[0], "rb") as fh:
                                 kt = fh.read()
@@ -438,8 +522,10 @@ def cmd_wire(a):
             gtl = secs.get(sec, [])
             _out_bytes("   gt-section: %s (%d oplines)\n" % (sec or "?", len(gtl)))
             ok, tot, extra, miss = gt_check(r["nodes"], gtl)
-            _out_bytes("   gt: opcode-name match %d/%d nodes "
-                       "(%d rule-expanded epilogue/catch nodes)\n" % (ok, tot, extra))
+            _out_bytes(
+                "   gt: opcode-name match %d/%d nodes "
+                "(%d rule-expanded epilogue/catch nodes)\n" % (ok, tot, extra)
+            )
             for m in miss:
                 _out_bytes("      %s\n" % m)
             if miss:
@@ -462,14 +548,24 @@ def _default_m5_dir() -> str:
 
 def cmd_lift(a):
     if not a.files:
-        _die("usage: ioncube-re lift FILE [--chunk N] [--arena A] [--ktab K] "
-             "[--gt GTFILE] [--no-auto] [--m5-dir DIR] [--valid-php] [--no-lint]")
+        _die(
+            "usage: ioncube-re lift FILE [--chunk N] [--arena A] [--ktab K] "
+            "[--gt GTFILE] [--no-auto] [--m5-dir DIR] [--valid-php] [--no-lint]"
+        )
     rc = 0
     for FILE in a.files:
         try:
-            r = lift_file(FILE, chunk=a.chunk, arena=a.arena, ktab=a.ktab, gt=a.gt,
-                          auto=not a.no_auto, m5dir=a.m5_dir or _default_m5_dir(),
-                          valid_php=a.valid_php)
+            r = lift_file(
+                FILE,
+                chunk=a.chunk,
+                arena=a.arena,
+                ktab=a.ktab,
+                gt=a.gt,
+                auto=not a.no_auto,
+                m5dir=a.m5_dir or _default_m5_dir(),
+                valid_php=a.valid_php,
+                debug=a.debug,
+            )
         except (PipelineError, StreamError, ValueError, OSError) as e:
             print(f"ic_lift: {e}", file=sys.stderr)
             raise SystemExit(VERIFY_FAIL)
@@ -492,11 +588,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"ioncube-re {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    d = sub.add_parser("decrypt", help="eval chain: decrypt FILE (writes .mainblob/.cipher)")
+    d = sub.add_parser(
+        "decrypt", help="eval chain: decrypt FILE (writes .mainblob/.cipher)"
+    )
     d.add_argument("files", nargs="+")
     d.add_argument("--out", default="ic_decrypted")
-    d.add_argument("--verify", action="store_true",
-                   help="verify files[0] against files[1:] reference dumps")
+    d.add_argument(
+        "--verify",
+        action="store_true",
+        help="verify files[0] against files[1:] reference dumps",
+    )
     d.set_defaults(fn=cmd_decrypt)
 
     k = sub.add_parser("key", help="show K / len / seed / stream seeds per file")
@@ -510,12 +611,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("stream", help="frame codec + deflate (ic_stream)")
     ss = s.add_subparsers(dest="cmd", required=True)
-    for name, help_ in (("decode", "encoded .php -> decoded stream"),
-                        ("decode-raw", "captured raw region + STREAM SEED -> stream"),
-                        ("components", "decode + component blob + layer-B decrypt"),
-                        ("prod", "production ICB0 multi-version files"),
-                        ("verify", "decode + byte-compare vs readerA dumps"),
-                        ("verify-raw", "raw + seed + byte-compare")):
+    for name, help_ in (
+        ("decode", "encoded .php -> decoded stream"),
+        ("decode-raw", "captured raw region + STREAM SEED -> stream"),
+        ("components", "decode + component blob + layer-B decrypt"),
+        ("prod", "production ICB0 multi-version files"),
+        ("verify", "decode + byte-compare vs readerA dumps"),
+        ("verify-raw", "raw + seed + byte-compare"),
+    ):
         sp = ss.add_parser(name, help=help_)
         sp.add_argument("files", nargs="+")
         sp.add_argument("--out", default=None)
@@ -547,15 +650,29 @@ def build_parser() -> argparse.ArgumentParser:
     l.add_argument("--gt")
     l.add_argument("--no-auto", action="store_true")
     l.add_argument("--m5-dir", default=None)
-    l.add_argument("--valid-php", action="store_true",
-                   help="adopt the goto-label fallback for irreducible flow "
-                        "(runnable output, unfaithful to the source shape — "
-                        "default is the faithful comment policy)")
-    l.add_argument("--lint", action=argparse.BooleanOptionalAction, default=True,
-                   help="php -l the rendered output (php81-test container; "
-                        "degraded pure-Python check when unavailable). "
-                        "Default: on; disable with --no-lint. Exit code 3 on "
-                        "lint failure.")
+    l.add_argument(
+        "--valid-php",
+        action="store_true",
+        help="adopt the goto-label fallback for irreducible flow "
+        "(runnable output, unfaithful to the source shape — "
+        "default is the faithful comment policy)",
+    )
+    l.add_argument(
+        "--debug",
+        action="store_true",
+        help="annotate the listing: line-number markers, component "
+        "headers with node counts, and the node-accounting "
+        "footer. Default off — clean readable PHP only.",
+    )
+    l.add_argument(
+        "--lint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="php -l the rendered output (php81-test container; "
+        "degraded pure-Python check when unavailable). "
+        "Default: on; disable with --no-lint. Exit code 3 on "
+        "lint failure.",
+    )
     l.set_defaults(fn=cmd_lift)
     return p
 

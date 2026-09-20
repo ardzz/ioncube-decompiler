@@ -105,21 +105,35 @@ def offline_parse(wire: bytes, seeds, ierg: int | None, x: int, sig_gate: bool):
         return None
     if r["thr"] != thr:
         return None
-    in_range = sum(1 for n in r["nodes"] if n["final"] is not None and n["final"] <= 206)
+    in_range = sum(
+        1 for n in r["nodes"] if n["final"] is not None and n["final"] <= 206
+    )
     if in_range < 0.95 * thr:
         return None
     if not r["nodes"]:
         return None
-    lastf = r["nodes"][-1]["final"]
-    if lastf not in (62, 199):
-        return None
     if sig_gate:
-        sig = sum(1 for n in r["nodes"] if n["sigok"])
-        if sig < 1:
+        # eval: the sig check is the real validation; the RETURN-tail check
+        # only sharpens it there. Prod (nosig) components legally end in the
+        # exception epilogue (HANDLE_EXCEPTION 149 / JMP 44 / OP_DATA...) —
+        # a lastf restriction there false-negatives whole components
+        # (CannedResponse::getResponseWithTagsReplaced etc., 461-file sweep).
+        lastf = r["nodes"][-1]["final"]
+        if lastf not in (62, 199):
             return None
+        from . import wd0
+
         for n in r["nodes"]:
-            if n["final"] is not None and n["sigok"] is False:
-                n["final"] = None  # trust final only where the sig validates
+            # wD0 node: the sig gate rejected it (sigok False, the stored
+            # final is masked garbage in either direction) — recover the
+            # true opcode from the loader's variant tables; None keeps the
+            # sig-validated-or-placeholder status quo
+            if n["sigok"] is not False:
+                continue
+            trueop = wd0.resolve(n["sig"], n["i"], thr, kt, x)
+            if trueop is not None:
+                n["trueop"] = trueop
+                n["final"] = trueop
     return (r, "offline-ktab")
 
 

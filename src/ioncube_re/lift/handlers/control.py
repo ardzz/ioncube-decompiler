@@ -16,6 +16,14 @@ def _jmp(ctx: LiftContext, i: int, end: int) -> int:
 
 @opcode_handler(43, 44, 46, 47)  # JMPZ / JMPNZ / JMPZ_EX / JMPNZ_EX
 def _branch(ctx: LiftContext, i: int, end: int) -> int:
+    # the match(true) lowering is a [cmp][BOOL_NOT|xor|IS_IDENTICAL true]
+    # [JMPNZ] chain — try the match degradation from its branch node first
+    if ctx.op[i] == 44 and i >= 2 and ctx.op[i - 1] in (14, 15, 16):
+        from ..switches import emit_match
+
+        m = emit_match(ctx, i - 1, end)
+        if m is not None:
+            return m
     return structurer.emit_if(ctx, i, end, ctx.op[i])
 
 

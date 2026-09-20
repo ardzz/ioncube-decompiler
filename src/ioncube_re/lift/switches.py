@@ -12,8 +12,8 @@ from ..serarr import decode_serarr
 from .model import LoopInfo, LiftContext
 from .operand import php_quote, unwrap
 
-_CMP_CASE = (48, 194)          # the CE generation's dispatch comparisons
-_CMP_HEADER = (48, 194, 18)    # + IS_EQUAL: the Blesta generation's form
+_CMP_CASE = (48, 194)  # the CE generation's dispatch comparisons
+_CMP_HEADER = (48, 194, 18)  # + IS_EQUAL: the Blesta generation's form
 _COND_JUMPS = (43, 44, 46, 47)
 
 
@@ -37,8 +37,15 @@ def emit_case(ctx: LiftContext, i: int, end: int) -> int:
         return sw
     n = ctx.nodes[i]
     r = ctx.render
-    e = "(" + r.ch(r.ex_op1(n)) + " " + ("===" if ctx.op[i] == 194 else "==") \
-        + " " + r.ch(r.ex_op2(n)) + ")"
+    e = (
+        "("
+        + r.ch(r.ex_op1(n))
+        + " "
+        + ("===" if ctx.op[i] == 194 else "==")
+        + " "
+        + r.ch(r.ex_op2(n))
+        + ")"
+    )
     return ctx.def_temp(n, e, i)
 
 
@@ -52,20 +59,26 @@ def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int
 
     cmp_ops = _CMP_HEADER if header else _CMP_CASE
     cases: list[dict] = []
-    default_target = None
+    default_target: int | None = None
     j = i + 1 if header else i
     while j + 1 < end:
         o1, o2 = ctx.op[j], ctx.op[j + 1]
         if o1 in cmp_ops and o2 in _COND_JUMPS:
             c, z = ctx.nodes[j], ctx.nodes[j + 1]
             zo, cre = z.ent.get("op1"), c.ent.get("res")
-            if not (zo and (zo.kind & 6) and cre and (cre.kind & 6)
-                    and z.op1 // 16 == c.res // 16):
+            if not (
+                zo
+                and (zo.kind & 6)
+                and cre
+                and (cre.kind & 6)
+                and z.op1 // 16 == c.res // 16
+            ):
                 break
             if j + 1 not in ctx.jt:
                 break
-            cases.append({"val": ctx.render.ex_op2(c), "target": ctx.jt[j + 1],
-                          "caseNode": j})
+            cases.append(
+                {"val": ctx.render.ex_op2(c), "target": ctx.jt[j + 1], "caseNode": j}
+            )
             j += 2
             continue
         if cases and o1 == 42 and j in ctx.jt:
@@ -146,8 +159,11 @@ def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int
         entries.append((None, default_target, None))
     entries.sort(key=lambda e: e[1])
     sortedT = [e[1] for e in entries]
-    lineNode = ctx.nodes[cases[0]["caseNode"]] if cases and cases[0]["caseNode"] is not None \
+    lineNode = (
+        ctx.nodes[cases[0]["caseNode"]]
+        if cases and cases[0]["caseNode"] is not None
         else ctx.nodes[i]
+    )
     ctx.line(lineNode)
     ctx.w("switch (" + unwrap(ctx.render.ch(subj)) + ") {")
     ctx.idp += 1
@@ -192,9 +208,300 @@ def _table_pairs(ctx: LiftContext, i: int):
     for val, target in pairs:
         if not (isinstance(target, int) and i + 1 < target < ctx.thr):
             return None, None
-        cases.append({"val": php_quote(str(val).encode("latin-1")),
-                      "target": target, "caseNode": None})
+        cases.append(
+            {
+                "val": php_quote(str(val).encode("latin-1")),
+                "target": target,
+                "caseNode": None,
+            }
+        )
     return cases, None
 
 
-__all__ = ["emit_case", "emit_switch", "emit_switch_header"]
+def emit_match(ctx: LiftContext, i: int, end: int) -> int | None:
+    """The PHP 8 match-expression lowering as the evaluation encoder emits
+    it — NOT a CASE chain, so emit_switch does not recognize it:
+      match(true):  [cmp][BOOL_NOT][JMPNZ->arm]... arms QM_ASSIGN + JMP merge
+      match($enum): {[BIND_STATIC][JMP_NULL][JMPNZ]}xN, default
+                    CHECK_UNDEF_ARGS, arms QM_ASSIGN + JMP merge, FREE(subject)
+    The walk arrives here either at the first BIND_STATIC unit (P2) or at
+    the BOOL_NOT of a P1 chain. The degradations render the arm table as a
+    comment and assign null — the arm VALUES are exact, the conditions are
+    not reconstructed (the eval keytable garbles the comparison opcodes),
+    and the whole span is bookkept so no masked-node noise remains."""
+    r = ctx.render
+
+    def zstr(e) -> str | None:
+        if e is not None and e.kind == 1 and e.raw < len(ctx.zvals):
+            from .operand import zval_name
+
+            nm = zval_name(ctx.zvals[e.raw])
+            if nm is not None:
+                return nm
+        return None
+
+    def arm_val(at: int) -> str | None:
+        if ctx.op[at] == 31:
+            return zstr(ctx.nodes[at].ent.get("op1"))
+        return None
+
+    if ctx.op[i] == 181:  # ---- P2: the enum/subject unit chain ----
+        units: list[dict] = []
+        j = i
+        while (
+            j + 2 < end
+            and ctx.op[j] == 181
+            and ctx.op[j + 1] == 196
+            and ctx.op[j + 2] == 44
+        ):
+            bs, jn, br = ctx.nodes[j], ctx.nodes[j + 1], ctx.nodes[j + 2]
+            bres = bs.ent.get("res")
+            jres = jn.ent.get("res")
+            bo1 = br.ent.get("op1")
+            if not (
+                bres
+                and jres
+                and bo1
+                and (bres.kind & 2)
+                and (jres.kind & 2)
+                and (bo1.kind & 2)
+                and jn.op2 // 16 == bs.res // 16
+                and br.op1 // 16 == jn.res // 16
+            ):
+                return None
+            # the branch target: the JMPNZ's op2 ENT raw (the -1 calibration
+            # is consistent across every observed arm target); node.op2 is
+            # the slot conv, not the target
+            tgt = br.ent["op2"].raw - 1
+            if not (i < tgt < ctx.thr):
+                return None
+            units.append(
+                {
+                    "cls": zstr(bs.ent.get("op1")),
+                    "nm": zstr(bs.ent.get("op2")),
+                    "tgt": tgt,
+                    "nodes": (j, j + 1, j + 2),
+                    "subjSlot": jn.op1 // 16,
+                    "subjRaw": jn.ent["op1"].raw,
+                }
+            )
+            j += 3
+        if len(units) < 2:
+            return None
+        # the subject temp + its value expr (FETCH_OBJ_R before the chain)
+        subjSlot = units[0]["subjSlot"]
+        subjDef = ctx.tempDef.get(subjSlot)
+        if subjDef is None or subjSlot not in ctx.tempExpr:
+            return None
+        subj = ctx.tempExpr[subjSlot]
+        # group units by arm target: (cond members..., arm value)
+        arms: dict[int, list[dict]] = {}
+        for u in units:
+            arms.setdefault(u["tgt"], []).append(u)
+        # scan forward: arms' QM_ASSIGN/JMP runs, the default, the FREE
+        armTexts: list[tuple[str, str]] = []
+        for tgt, us in arms.items():
+            v = arm_val(tgt)
+            if v is None:
+                return None
+            cls = us[0]["cls"]
+            nm = us[0]["nm"]
+            cond = (
+                " || ".join(f"{cls}::{u['nm']} === {subj}" for u in us)
+                if cls and all(u["nm"] for u in us)
+                else None
+            )
+            if cond is None:
+                return None
+            armTexts.append((cond, v))
+        # the default arm + FREE: scan past the last arm target. A
+        # CHECK_UNDEF_ARGS right after the chain is the no-default throw
+        # path — a match may be exhaustive (gdiverse4 match2), so "no
+        # default" is valid; the FREE(subject) is the reliable terminator.
+        lastT = max(arms)
+        armTargets = set(arms)
+        k = lastT
+        defaultVal = None
+        freeK = None
+        k = lastT + 1  # the arm at lastT was consumed by armTexts
+        while k < min(end, ctx.thr):
+            o = ctx.op[k]
+            if o == 197:  # CHECK_UNDEF_ARGS — the no-default throw guard
+                k += 1
+                continue
+            if o in (70, 127):
+                fo = ctx.nodes[k].ent.get("op1")
+                if fo and (fo.kind & 2) and fo.raw == units[0]["subjRaw"]:
+                    freeK = k
+                    k += 1
+                    break
+                k += 1
+                continue
+            if o == 31 and k not in armTargets and defaultVal is None:
+                defaultVal = zstr(ctx.nodes[k].ent.get("op1"))
+                k += 1
+                continue
+            if o in (42, 28):
+                k += 1
+                continue
+            break
+        if freeK is None:
+            return None
+        # the receiving CV (the ASSIGN right after the merge): res var
+        recv = None
+        mk = freeK + 1
+        if ctx.op[mk] == 22:
+            e1 = ctx.nodes[mk].ent.get("op1")
+            if e1 and e1.kind == 8:
+                recv = ctx.cv.get(e1.raw, f"CV{e1.raw}")
+        parts = "; ".join(f"{c} => '{v}'" for c, v in armTexts)
+        if defaultVal is not None:
+            parts += f"; default => '{defaultVal}'"
+        ctx.line(ctx.nodes[i])
+        if recv:
+            ctx.w(f"${recv} = /* match (degraded): {parts} */ null;")
+        else:
+            ctx.w(f"/* match (degraded): {parts} */")
+        ctx.emitted += 1
+        stop = (freeK + 1) if freeK is not None else (lastT + 1)
+        if ctx.op[stop] == 22:
+            # the merge ASSIGN (str = <arm temp>) is part of the lowering
+            e2 = ctx.nodes[stop].ent.get("op2")
+            e1 = ctx.nodes[stop].ent.get("op1")
+            if e1 and e1.kind == 8 and e2 and e2.kind == 2:
+                stop += 1
+        for k2 in range(i, stop):
+            ctx.bk(k2)
+        return stop
+    # ---- P1: match(true) — [cmp][BOOL_NOT|BOOL_XOR|=== true][JMPNZ] chain ----
+    if ctx.op[i] not in (14, 15, 16):
+        return None
+    units = []
+    j = i - 1  # the cmp behind the BOOL_NOT/BOOL_XOR/IS_IDENTICAL
+    while (
+        j >= 0 and j + 2 < end and ctx.op[j + 1] in (14, 15, 16) and ctx.op[j + 2] == 44
+    ):
+        cmpn, bn, br = ctx.nodes[j], ctx.nodes[j + 1], ctx.nodes[j + 2]
+        cres, bres = cmpn.ent.get("res"), bn.ent.get("res")
+        bo1 = br.ent.get("op1")
+        if not (
+            cres
+            and bres
+            and bo1
+            and (cres.kind & 2)
+            and (bres.kind & 2)
+            and (bo1.kind & 2)
+            and bn.op1 // 16 == cmpn.res // 16
+            and br.op1 // 16 == bn.res // 16
+        ):
+            return None
+        tgt = br.ent["op2"].raw - 1
+        if not (0 < tgt < ctx.thr):
+            return None
+        units.append({"tgt": tgt, "cmp": j, "nodes": (j, j + 1, j + 2)})
+        j = br.op2 - 1 - 2  # next cmp candidate: arm target - [QM][JMP]? no —
+        break  # the chain's cmp nodes are NOT adjacent (arms interleave);
+        # one unit suffices to anchor: collect the rest by walking the
+        # JMPNZ targets forward instead
+    if not units:
+        return None
+    # collect the full P1 chain forward from the anchor unit
+    seen = {units[0]["cmp"]}
+    queue = [units[0]]
+    arms1: dict[int, list[int]] = {}
+    for u in queue:
+        tgt = u["tgt"]
+        v = arm_val(tgt)
+        if v is None:
+            return None
+        arms1.setdefault(tgt, []).append(u["cmp"])
+        # the next chain unit may sit BEFORE this arm's body (the arms
+        # interleave: [cmp][not][JMPNZ][QM arm][JMP merge][cmp2]...) —
+        # scan a window around the arm target
+        for cand in range(max(0, tgt - 4), min(tgt + 3, end - 2)):
+            if (
+                ctx.op[cand] == 44
+                and cand - 2 >= 0
+                and ctx.op[cand - 1] in (14, 15, 16)
+                and cand - 3 >= 0
+                and ctx.op[cand - 2] != 181
+                and (cand - 2) not in seen
+            ):
+                cu = {
+                    "tgt": ctx.nodes[cand].ent["op2"].raw - 1,
+                    "cmp": cand - 2,
+                    "nodes": (cand - 2, cand - 1, cand),
+                }
+                if (
+                    isinstance(cu["tgt"], int)
+                    and cu["tgt"] > cand
+                    and cu["cmp"] not in seen
+                ):
+                    seen.add(cu["cmp"])
+                    queue.append(cu)
+    if len(arms1) < 2:
+        return None
+    units = list(queue)  # the queue collected the whole chain
+    armParts = []
+    for tgt, cmps in sorted(arms1.items()):
+        v = arm_val(tgt)
+        if v is None:
+            return None
+        armParts.append(v)
+    # the default arm: the JMP that immediately follows the last chain
+    # unit targets the default's QM_ASSIGN (the arms interleave:
+    # [unit1][unit2][JMP default][QM arm1][JMP][QM arm2][JMP][QM default])
+    lastUnit = units[-1]
+    dv = None
+    dtv = -1
+    dj = lastUnit["nodes"][2] + 1
+    if dj < end and ctx.op[dj] == 42:
+        dt = ctx.nodes[dj].ent.get("op1")
+        if dt is not None and dt.kind == 0:
+            dtv = dt.raw - 1
+            if 0 < dtv < ctx.thr:
+                dv = arm_val(dtv)
+    # the receiving CV: the ASSIGN whose op2 carries the arms' result temp
+    # (the eval keytable garbles its opcode — match on the operand shape,
+    # an op1 CV + an op2 T equal to the arm QM_ASSIGN's res). It sits at
+    # the merge, right after the default arm's JMP.
+    recv = None
+    recvNode = None
+    armRes = ctx.nodes[min(arms1)].ent.get("res")
+    mergeStart = max(arms1)
+    if dv is not None and dtv + 1 < ctx.thr and ctx.op[dtv + 1] == 42:
+        mt = ctx.nodes[dtv + 1].ent.get("op1")
+        if mt is not None and mt.kind == 0:
+            mergeStart = mt.raw - 1
+    for cand in range(mergeStart, min(mergeStart + 4, ctx.thr)):
+        nn = ctx.nodes[cand]
+        e1, e2 = nn.ent.get("op1"), nn.ent.get("op2")
+        if (
+            e1
+            and e1.kind == 8
+            and e2
+            and e2.kind == 2
+            and armRes
+            and e2.raw == armRes.raw
+        ):
+            recv = ctx.cv.get(e1.raw, f"CV{e1.raw}")
+            recvNode = cand
+            break
+    parts = " | ".join(f"'{v}'" for v in armParts)
+    if dv is not None:
+        parts += f" | default '{dv}'"
+    ctx.line(ctx.nodes[units[0]["cmp"]])
+    if recv:
+        ctx.w(f"${recv} = /* match (degraded): {parts} */ null;")
+    else:
+        ctx.w(f"/* match (degraded): {parts} */")
+    ctx.emitted += 1
+    stop = max(max(arms1) + 2, units[-1]["nodes"][2] + 1)
+    if recvNode is not None:
+        stop = max(stop, recvNode + 1)
+    for k2 in range(units[0]["cmp"], stop):
+        ctx.bk(k2)
+    return stop
+
+
+__all__ = ["emit_case", "emit_match", "emit_switch", "emit_switch_header"]

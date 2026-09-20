@@ -1,40 +1,86 @@
 # ioncube-re
 
-Offline ionCube research toolchain — a Python port of the frozen PHP oracles
-from the authorized ionCube Loader reverse-engineering project
-(`the research workspace notes`. README fix: no absolute personal paths, with the two benchmark-driven
-emitter gaps closed (interned-name resolution and arg_info typed
-signatures). Pure stdlib at runtime; the loader is **never** executed.
+Offline ionCube research toolchain. A Python port of the frozen PHP oracles
+from the authorized ionCube Loader reverse-engineering project (M-series
+research notes). It decrypts encoded files, walks the wire grammar, and lifts
+oplines back to readable PHP. Pure stdlib at runtime; the loader is never
+executed.
+
+## Quick start
 
     uv sync
-    uv run pytest                      # the full validation matrix (needs the
-                                       # research workspace + php for the oracle
-                                       # comparisons; skips gracefully without)
+    uv run pytest                      # full validation matrix; needs the
+                                       # research workspace + php for oracle
+                                       # comparisons, skips without
     uv run ioncube-re lift FILE        # encoded file -> readable PHP listing
+
+### Example
+
+`demo-source.php`, compiled with the ionCube 8.1 encoder and lifted with
+`uv run ioncube-re lift demo-encoded.php`:
+
+    <?php
+    $issuer = new LicenseIssuer();
+    $token = $issuer->issue('acme-corp', time());
+    $issuer->daysLeft($token, time());
+    printf("token=%s days_left=%d\n", $token); /* no DO_FCALL seen */
+
+    class LicenseIssuer {
+        function issue(string $customer, int $now): string {
+            $stamp = base_convert((string)($now), 10, 36);
+            $customer = strtoupper($customer);
+            $sig = substr(hash_hmac('sha256', $customer . $stamp, '81518ad9d596db1456828f0391e37436b85af7cac607fc56b203fea292f0f66e6'), 0, 16);
+            return $customer . ':' . $stamp . ':' . strtoupper($sig);
+        }
+
+        function daysLeft(string $token, int $now): int {
+            $V8 = explode(':', $token);
+            $customer = $V8[0];
+            $stamp = $V8[1];
+            $sig = $V8[2];
+            $issued = (int)(base_convert($stamp, 36, 10));
+            $age = intdiv(($now - $issued), 86400);
+            $T21 = $age < 0;
+            $T21 = (bool)((14 < $age));
+            if ($age < 0 || (bool)((14 < $age))) {
+                return 0;
+            }
+            $expect = strtoupper(substr(hash_hmac('sha256', $customer . $stamp, '81518ad9d596db1456828f0391e37436b85af7cac607fc56b203fea292f0f66e6'), 0, 16));
+            if (!(hash_equals($expect, $sig))) {
+                return 0;
+            }
+            return 14 - $age;
+        }
+
+    }
+    LINT: OK
+
+The lifted output passes `php -l`. Typed signatures, constant literals, and
+string data come from the wire; `$V*`/`$T*` names mark values the wire does
+not name (temporary variables), and the `/* no DO_FCALL seen */` comment flags
+a discarded call result the encoder optimized away.
 
 ## The lift package (the KISS/SOLID refactor, notes/REFACTOR.md)
 
-```
-src/ioncube_re/lift/
-├── model.py        # dataclasses: Node/Operand/Component/LiftContext — the shared vocabulary
-├── analysis.py     # context-build passes: opcode map, +2 garble, jt calibration, +4 VAR reads
-├── registry.py     # HANDLERS dict + @opcode_handler — new opcode = new entry, zero core edits
-├── operand.py      # OperandRenderer (temps/CVs/refs → text) + the pure literal helpers
-├── collectors.py   # call/NEW/array-literal expression collection (the DO stopping point)
-├── structurer.py   # try/if/else/return/jumps + break/continue levels + ternary + goto mode
-├── loops.py        # while forms (priming, do-while) + foreach (key-in-temp fold)
-├── switches.py     # the switch family: CASE chains, jumptable headers, table fallback
-├── emitter.py      # the walk: emit_region/emit_node dispatch (no family logic)
-├── wires.py        # sub-wire scan + stream string extraction
-├── sources.py      # opcode-source resolution (m5 captures, offline keytable)
-├── signature.py    # parameter/type metadata + param_list
-├── pipeline.py     # lift_file: component discovery → assembly → listing
-└── handlers/       # one module per opcode family (arithmetic/arrays/calls/
-                    # control/objects/variables/misc), ~≤250 lines each
-```
+    src/ioncube_re/lift/
+    ├── model.py        # dataclasses: Node/Operand/Component/LiftContext, the shared vocabulary
+    ├── analysis.py     # context-build passes: opcode map, +2 garble, jt calibration, +4 VAR reads
+    ├── registry.py     # HANDLERS dict + @opcode_handler: new opcode = new entry, zero core edits
+    ├── operand.py      # OperandRenderer (temps/CVs/refs → text) + the pure literal helpers
+    ├── collectors.py   # call/NEW/array-literal expression collection (the DO stopping point)
+    ├── structurer.py   # try/if/else/return/jumps + break/continue levels + ternary + goto mode
+    ├── loops.py        # while forms (priming, do-while) + foreach (key-in-temp fold)
+    ├── switches.py     # the switch family: CASE chains, jumptable headers, table fallback
+    ├── emitter.py      # the walk: emit_region/emit_node dispatch (no family logic)
+    ├── wires.py        # sub-wire scan + stream string extraction
+    ├── sources.py      # opcode-source resolution (m5 captures, offline keytable)
+    ├── signature.py    # parameter/type metadata + param_list
+    ├── pipeline.py     # lift_file: component discovery → assembly → listing
+    └── handlers/       # one module per opcode family (arithmetic/arrays/calls/
+                        # control/objects/variables/misc), ~≤250 lines each
 
-Every module ≤250 lines; the decode layers (container/stream/wire/crypto)
-are frozen and untouched by the refactor.
+Every module stays under 250 lines. The decode layers (container/stream/wire/
+crypto) are frozen and untouched by the refactor.
 
 ## Commands (mirroring the PHP CLIs)
 
@@ -48,12 +94,12 @@ are frozen and untouched by the refactor.
 | `ioncube-re lift FILE [--chunk N] [--gt GT] [--no-auto] [--m5-dir D] [--valid-php]` | `ic_lift.php` | oplines → PHP source (typed signatures, interned names, no CONCAT parens, switch/break/ternary/priming structurer, opt-in goto-label fallback) |
 
 Exit codes match the oracles: 0 ok, 1 usage/io, 2 verification/walk failure.
-`wire`'s stdout is **byte-identical** to `php legacy-php/ic_wire.php` (the opline
+`wire`'s stdout is byte-identical to `php legacy-php/ic_wire.php` (the opline
 parity surface); decrypt/stream/lift print close-but-not-identical reports
 (the artifacts they write are byte-exact).
 
-Deviations from the PHP CLIs (documented): the oracles' leading-dash
-subcommands (`--verify`) are flags here; the m5 auto-discovery root comes
+Deviations from the PHP CLIs, documented: the oracles' leading-dash
+subcommands (`--verify`) are flags here, and the m5 auto-discovery root comes
 from `--m5-dir` / `$IONCUBE_RE_M5_DIR` instead of a hardcoded relative path.
 
 ## Loader-version support matrix
@@ -65,51 +111,62 @@ from `--m5-dir` / `$IONCUBE_RE_M5_DIR` instead of a hardcoded relative path.
 | Containers | "basic" eval container (magic dispatch `0x4ff571b7`) + production ICB0 multi-version | M4 / M5-PROD |
 | Wire grammar | sig mode (v>5, eval 8.1 + CE 8.4 chunks) and nosig mode (v≤5, CE 8.2/8.3 chunks), auto-detected | M6-OPERANDS §1.1 |
 | Opcode table | PHP 8.1 names (201) | php81 container binary |
-| Offline keytable | MWC6^ierg formula — ClientExec generation + eval; **Blesta's older generation fails the validation gate** (wire-only lift) | M6-KEYTAB |
+| Offline keytable | MWC6^ierg formula (ClientExec generation + eval); Blesta's older generation fails the validation gate (wire-only lift) | M6-KEYTAB |
 
 ## Validation summary (all asserted in `tests/`)
 
-- **Crypto** byte-exact vs the live gdb captures: K/escdec, pbl ciphers,
+- Crypto: byte-exact against the live gdb captures: K/escdec, pbl ciphers,
   adler17, MD4-fold = 120, the 172/172 main blobs, 368/368 component cipher,
   11/11 offline keytables.
-- **Stream** byte-exact: marker81 1007/1007 vs the readerA concatenation;
-  python vs `php legacy-php/ic_stream.php` on marker81 + 3 CE files + 1 blesta file
-  (streams, component blobs, plains, and the frame-codec **intermediates**
-  — the latter via a /tmp PHP harness that eval-loads the frozen library).
-- **Wire**: full stdout byte-identical to `php legacy-php/ic_wire.php --offline` on
-  all 11 eval wires + CE streams; the 11-component gt table (105 gt oplines +
-  16 rule-expanded = 121/121 nodes, zero MISS); the CE 17-file × 3-chunk
-  walk==EOF sweep with every demasked final in the opcode range.
-- **Lift**: marker81 lifts to `function hello(string $who): string { return
+- Stream: byte-exact: marker81 1007/1007 against the readerA concatenation;
+  python vs `php legacy-php/ic_stream.php` on marker81 + 3 CE files + 1
+  blesta file (streams, component blobs, plains, and the frame-codec
+  intermediates, the latter via a /tmp PHP harness that eval-loads the frozen
+  library).
+- Wire: full stdout byte-identical to `php legacy-php/ic_wire.php --offline`
+  on all 11 eval wires + CE streams; the 11-component gt table (105 gt
+  oplines + 16 rule-expanded = 121/121 nodes, zero MISS); the CE 17-file ×
+  3-chunk walk==EOF sweep with every demasked final in the opcode range.
+- Lift: marker81 lifts to `function hello(string $who): string { return
   'hi ' . $who; }` + `echo hello('AAAA_marker_0001');` (semantic match to the
   ground-truth marker.php, matching decodephp.io's output); cron.php matches
   decodephp's production preview statement-for-statement (§9.3, 6/6).
-- **Corpus sweep**: the CLI chain exits 0 on all 461 encoded files
-  (455 ClientExec + 6 Blesta).
+- Corpus sweep: the CLI chain exits 0 on all 461 encoded files (455
+  ClientExec + 6 Blesta).
 
 ## Honest limitations (full list: `notes/PYTHON-PORT.md`)
 
-- wD0-node opcode recovery for eval v>5 wires still needs the arena capture
-  (the offline ktab sig-gates those nodes to placeholders); the CE encoder
+- wD0-node opcode recovery for eval v>5 wires still needs the arena capture;
+  the offline ktab sig-gates those nodes to placeholders. The CE encoder
   leaves the true opcode in the dance value, so production lifts fully.
-- Blesta's encoder generation fails the offline-keytable validation gate →
-  structure + literals + try/catch only (per-node placeholders).
+- Blesta's encoder generation fails the offline-keytable validation gate, so
+  those lifts get structure + literals + try/catch with per-node placeholders.
 - The wire parser does not descend into nested sub-function wires (the
-  grammar's [sf] section): 5 CE corpus files end their walk early —
-  byte-identical behavior to the PHP oracle, which does the same.
+  grammar's [sf] section): 5 CE corpus files end their walk early,
+  byte-identical to the PHP oracle, which does the same.
 - Interned names resolve from the full validated 591+2-entry loader table
   (4308 corpus references, zero unresolved); indices beyond the table or
-  with a length mismatch keep the `/*interned-N len=L*/` placeholder —
-  never a guess.
+  with a length mismatch keep the `/*interned-N len=L*/` placeholder, never
+  a guess.
 - M6's 18 imperfect operand conversions (INIT_FCALL frame sizes, wD0-node
   jump-target rewrites, 0x12/0x22 result flags) carry over unchanged.
 - Serialized-array zvals recover their string elements only.
+- On eval-generation files, a 64-bit long zval whose high word falls outside
+  i32 renders from the low word only (the encoder's ktab mask rides the high
+  word); true >2^31 integers are the casualty. Production files are
+  unaffected: their high words fit i32 across the 461-file corpus.
 - Round-trip validity is not a goal: this is a decompiler listing.
 
 ## Dependencies
 
 `z3-solver` and `capstone` are declared per the project spec (the research
 lineage: the M6 z3 wire-mask solve and the loader disassembly). The shipped
-deterministic ports import neither — they run on the Python stdlib alone
+deterministic ports import neither; they run on the Python stdlib alone
 (hashlib has no MD4 on OpenSSL 3, so `crypto/md4fold.py` carries a compact
 pure-Python RFC-1186 MD4, cross-checked against PHP's `hash('md4')`).
+
+## License
+
+MIT. See [LICENSE](LICENSE). Use responsibly: this tool exists to recover
+source you own or are licensed to maintain, not to bypass license terms. See
+[SECURITY.md](SECURITY.md) for the intended-use policy and reporting route.

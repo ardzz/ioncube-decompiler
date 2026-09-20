@@ -1,18 +1,13 @@
 # ioncube-re
 
-Offline ionCube research toolchain. A Python port of the frozen PHP oracles
-from the authorized ionCube Loader reverse-engineering project (M-series
-research notes). It decrypts encoded files, walks the wire grammar, and lifts
-oplines back to readable PHP. Pure stdlib at runtime; the loader is never
-executed.
+Offline ionCube decompiler. It decrypts encoded files, walks the wire
+grammar, and lifts oplines back to readable PHP. Pure stdlib at runtime; the
+loader is never executed.
 
 ## Quick start
 
     uv sync
-    uv run pytest                      # full validation matrix; needs the
-                                       # research workspace + php for oracle
-                                       # comparisons, skips without
-    uv run ioncube-re lift FILE        # encoded file -> readable PHP listing
+    uv run ioncube-re lift demo/demo-encoded.php
 
 ### Example
 
@@ -64,68 +59,56 @@ string data come from the wire; `$V*`/`$T*` names mark values the wire does
 not name (temporary variables), and the `/* no DO_FCALL seen */` comment flags
 a discarded call result the encoder optimized away.
 
-## Commands (mirroring the PHP CLIs)
+Note what survived decompilation: the "hidden" signing key. ionCube
+obfuscation protects code structure, not the data inside it. Keep secrets
+server-side.
 
-| command | PHP counterpart | what it does |
-|---|---|---|
-| `ioncube-re decrypt FILE [--out P] [--verify REF...]` | `ic_decrypt.php decrypt / --verify` | eval chain: custom-b64 → escdec K → pbl → adler(a0=17)+MD4-fold verify → X3_(5) keystream → main blob |
-| `ioncube-re key FILE...` | `ic_decrypt.php key` | K / len / seed / stream seeds per file |
-| `ioncube-re component CIPHER --key eval\|HEX` | `ic_decrypt.php component` | layer-B component decrypt (17-byte eval key) |
-| `ioncube-re stream decode\|decode-raw\|components\|prod\|verify\|verify-raw` | `ic_stream.php` | frame codec + raw DEFLATE; production ICB0 multi-version chunks |
-| `ioncube-re wire [--ktab K] [--arena A] [--offline --seeds A,B --ierg 0x.. \| --stream --mainblob B] [--gt GT] FILE...` | `ic_wire.php` | wire-grammar walk, node assembly, offline keytable demask, gt cross-check |
-| `ioncube-re lift FILE [--chunk N] [--gt GT] [--no-auto] [--m5-dir D] [--valid-php]` | `ic_lift.php` | oplines → PHP source (typed signatures, interned names, no CONCAT parens, switch/break/ternary/priming structurer, opt-in goto-label fallback) |
+## Commands
 
-Exit codes match the oracles: 0 ok, 1 usage/io, 2 verification/walk failure.
-`wire`'s stdout is byte-identical to `php legacy-php/ic_wire.php` (the opline
-parity surface); decrypt/stream/lift print close-but-not-identical reports
-(the artifacts they write are byte-exact).
+| command | what it does |
+|---|---|
+| `ioncube-re decrypt FILE [--out P] [--verify REF...]` | eval chain: custom-b64 → escdec K → pbl → adler(a0=17)+MD4-fold verify → X3_(5) keystream → main blob |
+| `ioncube-re key FILE...` | decryption key / length / seeds per file |
+| `ioncube-re component CIPHER --key eval\|HEX` | layer-B component decrypt (17-byte eval key) |
+| `ioncube-re stream decode\|decode-raw\|components\|prod\|verify\|verify-raw` | frame codec + raw DEFLATE; production ICB0 multi-version chunks |
+| `ioncube-re wire [--ktab K] [--arena A] [--offline --seeds A,B --ierg 0x.. \| --stream --mainblob B] [--gt GT] FILE...` | wire-grammar walk, node assembly, offline keytable demask, gt cross-check |
+| `ioncube-re lift FILE [--chunk N] [--gt GT] [--no-auto] [--m5-dir D] [--valid-php]` | oplines → PHP source (typed signatures, interned names, switch/ternary structuring, opt-in goto-label fallback) |
 
-Deviations from the PHP CLIs, documented: the oracles' leading-dash
-subcommands (`--verify`) are flags here, and the m5 auto-discovery root comes
-from `--m5-dir` / `$IONCUBE_RE_M5_DIR` instead of a hardcoded relative path.
+Exit codes: 0 ok, 1 usage/io, 2 verification/walk failure.
 
-## Loader-version support matrix
+## Supported formats
 
-| what | supported | evidence |
-|---|---|---|
-| Loader build | 15.5.0 family (`ioncube_loader_lin_8.1.so`, SHA256 `380f2ecad4ba295f66ebd88a758b55a75fc567b17b852e95f4788b0b588ebf98`, Ghidra-analyzed) | M4–M6 notes; hash asserted in tests |
-| PHP targets | 8.1 (eval), 8.1/8.2/8.3/8.4 (production chunks) | the 11 eval components + a production file corpus (3 chunks each) |
-| Containers | "basic" eval container (magic dispatch `0x4ff571b7`) + production ICB0 multi-version | M4 / M5-PROD |
-| Wire grammar | sig mode (v>5, newer encoder generation) and nosig mode (v≤5, older generations), auto-detected | M6-OPERANDS §1.1 |
-| Opcode table | PHP 8.1 names (201) | php81 container binary |
-| Offline keytable | MWC6^ierg formula, validated per file; files from older encoder generations that fail the gate lift wire-only | M6-KEYTAB |
+| what | supported |
+|---|---|
+| Loader build | 15.5.0 family, PHP 8.1 (`ioncube_loader_lin_8.1.so`) |
+| PHP targets | 8.1 (eval-encoded files), 8.1/8.2/8.3/8.4 (production chunks) |
+| Containers | "basic" eval container + production ICB0 multi-version |
+| Wire grammar | sig mode (v>5) and nosig mode (v≤5), auto-detected |
+| Opcode table | PHP 8.1 names (201) |
+| Offline keytable | MWC6^ierg formula, validated per file; files whose keytable fails the gate lift wire-only |
 
-## Honest limitations (full list: `notes/PYTHON-PORT.md`)
+## Limitations
 
-- wD0-node opcode recovery for eval v>5 wires still needs the arena capture;
-  the offline ktab sig-gates those nodes to placeholders. The production
-  encoder generation leaves the true opcode in the dance value, so production
-  files lift fully.
-- Files from encoder generations that fail the offline-keytable validation
-  gate get structure + literals + try/catch with per-node placeholders.
+- wD0-node opcode recovery for eval v>5 wires falls back to placeholders.
+  The production encoder generation leaves the true opcode in the dance
+  value, so production files lift fully.
+- Files whose offline-keytable validation fails get structure + literals +
+  try/catch with per-node placeholders.
 - The wire parser does not descend into nested sub-function wires (the
-  grammar's [sf] section): the walk ends early there, byte-identical to the
-  PHP oracle, which does the same.
-- Interned names resolve from the full validated 591+2-entry loader table
-  (all corpus references resolved); indices beyond the table or
-  with a length mismatch keep the `/*interned-N len=L*/` placeholder, never
-  a guess.
-- M6's 18 imperfect operand conversions (INIT_FCALL frame sizes, wD0-node
-  jump-target rewrites, 0x12/0x22 result flags) carry over unchanged.
+  grammar's [sf] section).
+- Interned names resolve from a validated loader-string table; unknown
+  indices keep an `/*interned-N len=L*/` placeholder, never a guess.
 - Serialized-array zvals recover their string elements only.
 - On eval-generation files, a 64-bit long zval whose high word falls outside
-  i32 renders from the low word only (the encoder's ktab mask rides the high
-  word); true >2^31 integers are the casualty. Production files are
-  unaffected.
+  i32 renders from the low word only; true >2^31 integers are the casualty.
+  Production files are unaffected.
 - Round-trip validity is not a goal: this is a decompiler listing.
 
 ## Dependencies
 
-`z3-solver` and `capstone` are declared per the project spec (the research
-lineage: the M6 z3 wire-mask solve and the loader disassembly). The shipped
-deterministic ports import neither; they run on the Python stdlib alone
-(hashlib has no MD4 on OpenSSL 3, so `crypto/md4fold.py` carries a compact
-pure-Python RFC-1186 MD4, cross-checked against PHP's `hash('md4')`).
+Python ≥ 3.12, managed with uv. The runtime is stdlib-only; dev extras are
+pytest (tests) and z3-solver + capstone (declared for research tooling, not
+imported by the shipped code).
 
 ## License
 

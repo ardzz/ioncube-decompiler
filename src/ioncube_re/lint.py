@@ -38,9 +38,10 @@ def container_up() -> bool:
         return False
     try:
         r = subprocess.run(
-            ["docker", "ps", "--filter", f"name={CONTAINER}", "--format",
-             "{{.Names}}"],
-            capture_output=True, text=True, timeout=15,
+            ["docker", "ps", "--filter", f"name={CONTAINER}", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -49,13 +50,46 @@ def container_up() -> bool:
 
 def php_lint(text: str) -> tuple[str, bool]:
     """Lint one rendered listing. Returns (final report line, ok)."""
+    # a rerun's previous LINT trailer inside the listing is source, not
+    # report — php -l chokes on it ("unexpected identifier"); strip it
+    text = re.sub(r"^LINT: (OK|FAIL).*$", "", text, flags=re.MULTILINE)
     if not container_up():
+        host = shutil.which("php")
+        if host is not None:
+            # the container is absent but a host php -l works — same gate,
+            # not a degraded mode (the error-line regexes cover both forms:
+            # stdin says "Standard input code", /dev/stdin says the path)
+            try:
+                r = subprocess.run(
+                    [host, "-l", "/dev/stdin"],
+                    input=text.encode("latin-1", "replace"),
+                    capture_output=True,
+                    timeout=120,
+                )
+            except (OSError, subprocess.SubprocessError) as e:
+                return _degraded(text, f"php -l failed: {e}")
+            out = (r.stdout + b"\n" + r.stderr).decode("latin-1", "replace")
+            err = re.search(
+                r"^(?:PHP )?(?:Parse|Fatal) error:\s*(.*) in .* on line (\d+)\s*$",
+                out,
+                re.MULTILINE,
+            )
+            if r.returncode == 0 and "No syntax errors detected" in out:
+                return "LINT: OK", True
+            if err:
+                return (
+                    f"LINT: FAIL (line {err.group(2)}: {err.group(1).strip()})",
+                    False,
+                )
+            first = out.strip().splitlines()[0] if out.strip() else "no output"
+            return f"LINT: FAIL (php -l rc={r.returncode}: {first})", False
         return _degraded(text, "php81-test container unavailable")
     try:
         r = subprocess.run(
             ["docker", "exec", "-i", CONTAINER, "php", "-l"],
             input=text.encode("latin-1", "replace"),
-            capture_output=True, timeout=120,
+            capture_output=True,
+            timeout=120,
         )
     except (OSError, subprocess.SubprocessError) as e:
         return _degraded(text, f"docker exec failed: {e}")
@@ -72,6 +106,7 @@ def php_lint(text: str) -> tuple[str, bool]:
 
 
 # ---- the pure-Python degraded engine ----
+
 
 def _balance(text: str) -> tuple[int, str] | None:
     """First bracket/quote imbalance as (line, msg), or None when balanced.

@@ -90,6 +90,8 @@ def _instanceof(ctx: LiftContext, i: int, end: int) -> int:
         cls = zval_name(ctx.zvals[e2.raw])
     if cls is None:
         cls = bare(r.ch(r.ex_op2(n)))
+    # an unresolved kind-0 class operand renders as the bare value: the
+    # lint gate rejects it visibly rather than guessing a declared class
     return ctx.def_temp(n, r.ch(r.ex_op1(n)) + " instanceof " + cls, i)
 
 

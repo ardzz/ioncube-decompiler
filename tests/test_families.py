@@ -131,12 +131,40 @@ def test_arith_qm_assign_passthrough():
 def test_assign_statement_and_res_temp():
     l = mk(
         [(22, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
-        zvals=[{"type": 4, "a": 5}],
+        zvals=[{"type": 4, "a": 7}],  # +2 anti-tamper: 7 -> 5
         cv={0: "x"},
     )
     emit_node(l, 0, l.thr)
     assert "$x = 5;" in out(l)
     assert l.tempExpr[7] == "5"
+
+
+def test_assign_int_const_ungarble():
+    """The loader's Assign/AssignOp handler subtracts 2 from a direct IS_LONG
+    const at dispatch; a non-assign operand (SEND_VAL) is untouched."""
+    l = mk(
+        [
+            (22, {"op1": (8, 0), "op2": (1, 0)}, {}, 0),
+            (26, {"op1": (8, 1), "op2": (1, 1)}, {}, 1),  # ASSIGN_OP +
+        ],
+        zvals=[{"type": 4, "a": 32}, {"type": 4, "a": 0}],
+        cv={0: "days", 1: "n"},
+    )
+    emit_node(l, 0, l.thr)
+    emit_node(l, 1, l.thr)
+    t = out(l)
+    assert "$days = 30;" in t  # 32 - 2, not 32
+    assert "$n += -2;" in t  # 0 - 2, not 0
+    # an OP_DATA value form (ASSIGN_OBJ_OP) is NOT biased
+    l2 = mk(
+        [
+            (28, {"op1": (0, 0), "op2": (1, 0)}, {}, 1),
+            (137, {"op1": (1, 1)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"count"}, {"type": 4, "a": 3}],
+    )
+    emit_node(l2, 0, l2.thr)
+    assert "$this->count += 3;" in out(l2)  # 3 stays 3
 
 
 def test_incdec_forms():
@@ -198,13 +226,33 @@ def test_isset_empty_families():
         [
             (114, {"op1": (8, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
             (114, {"op1": (8, 1), "res": (2, 0)}, {"res": 8 * 16}, 2),
+            # the production generation sets ZEND_ISEMPTY on bit0 (ext=1)
+            (114, {"op1": (8, 2), "res": (2, 0)}, {"res": 9 * 16}, 1),
         ],
-        cv={0: "x", 1: "y"},
+        cv={0: "x", 1: "y", 2: "z"},
     )
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "isset($x)"
     emit_node(l, 1, l.thr)
     assert l.tempExpr[8] == "empty($y)"
+    emit_node(l, 2, l.thr)
+    assert l.tempExpr[9] == "empty($z)"
+
+
+def test_isset_empty_prop_bit0():
+    """ISSET_ISEMPTY_PROP_OBJ (148) honours the bit0 generation too."""
+    l = mk(
+        [
+            (148, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (148, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 8 * 16}, 1),
+        ],
+        zvals=[{"type": 6, "str": b"p"}],
+        cv={0: "o"},
+    )
+    emit_node(l, 0, l.thr)
+    assert l.tempExpr[7] == "isset($o->p)"
+    emit_node(l, 1, l.thr)
+    assert l.tempExpr[8] == "empty($o->p)"
 
 
 def test_unset_var_and_bind_global():

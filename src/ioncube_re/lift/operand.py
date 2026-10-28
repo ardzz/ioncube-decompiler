@@ -24,6 +24,14 @@ from .model import LiftContext, Node
 def php_quote(s: bytes) -> str:
     t = s.decode("latin-1")
     if any(c in t for c in "\n\r\t"):
+        if "$" in t:
+            # a multi-line template carrying `{$a.b}`/`$x` literally: those
+            # are not valid/faithful double-quote interpolation, a nowdoc
+            # reproduces the exact bytes
+            sentinel = "EOT"
+            while sentinel in t:
+                sentinel += "_"
+            return f"<<<'{sentinel}'\n{t}\n{sentinel}"
         t = t.replace("\\", "\\\\").replace('"', '\\"')
         t = t.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
         return f'"{t}"'
@@ -32,6 +40,21 @@ def php_quote(s: bytes) -> str:
 
 def zval_php(z: dict, idx: int) -> str:
     """A zval as a PHP expression (icl_zval_php port + interned resolution)."""
+    raw = z.get("str")
+    if raw is not None and raw[:1] == b"\x81" and b"@:" in raw:
+        # a serialized constant-fetch record: either a plain namespaced
+        # constant (`@:65:...s<n>'Ns\NAME`) or a class constant
+        # (`@:64:...s<n>'Cls` ... `s<n>'NAME`, class-scope `self` included)
+        names = []
+        for m in re.finditer(rb"s(\d+)'", raw):
+            ln = int(m.group(1))
+            names.append(raw[m.end() : m.end() + ln].decode("latin-1"))
+        if names:
+            if names[0] == "self":
+                return f"self::{names[-1]}"
+            if len(names) == 1:
+                return f"\\{names[0]}"
+            return f"\\{names[0]}::{names[-1]}"
     t = z["type"] & 0xFF
     if t == 4:
         if z.get("b"):
@@ -256,6 +279,29 @@ class OperandRenderer:
     def ex_op2(self, n: Node) -> str | None:
         return self.ex(n, "op2")
 
+    def assigned_value(self, n: Node, which: str = "op2") -> str | None:
+        """The value operand of a scalar ASSIGN/ASSIGN_OP (op 22/26).
+
+        The encoder stores a direct IS_LONG const here with a +2
+        anti-tamper bias — the loader's Assign/AssignOp dispatch subtracts
+        2 again (M6-SUBWIRE §7.5, arena-verified for ASSIGN_OP; the plain
+        ASSIGN rides the same handler). Mirror it so `$x = 30` isn't lifted
+        as `$x = 32`. The DIM/OBJ value forms arrive through OP_DATA and are
+        untouched, and so are argument/comparison operands.
+        """
+        e = n.ent.get(which)
+        if e is not None and e.kind == 1 and e.raw < len(self.ctx.zvals):
+            z = self.ctx.zvals[e.raw]
+            if (z.get("type") & 0xFF) == 4:
+                if z.get("b"):
+                    v = ((z["b"] & 0xFFFFFFFF) << 32) | (z["a"] & 0xFFFFFFFF)
+                    if v >= 1 << 63:
+                        v -= 1 << 64
+                else:
+                    v = z["a"]
+                return str(v - 2)
+        return self.ex(n, which)
+
     def ch(self, e: str | None) -> str:
         return "null" if e is None else e
 
@@ -312,6 +358,17 @@ class OperandRenderer:
         # bare form is a parse error
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", e):
             return "$" + e
+        # a bare `new X()` receiver needs explicit parens: `new X()->m()`
+        # only parses on PHP >= 8.4, while `(new X())->m()` is valid on every
+        # version — in-place execution targets 8.2/8.3.
+        if e.startswith("new "):
+            return "(" + e + ")"
+        # a literal receiver (an inlined negative int temp) needs parens:
+        # `-1[1]` parses as `-(1[1])`
+        if re.fullmatch(r"-?\d+", e) or (
+            len(e) >= 2 and e[0] in "\"'" and e[-1] == e[0]
+        ):
+            return "(" + e + ")"
         return e
 
     def callee_name(self, n: Node, which: str) -> str | None:

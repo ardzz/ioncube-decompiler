@@ -174,11 +174,88 @@ def parse_wire(
             f"note: fn-info entries present ({fi}) — reader not modeled",
             file=sys.stderr,
         )
+
+    def _grammar_fit(pos_opcnt: int):
+        """Read an opcnt candidate at `pos_opcnt` and test both grammars
+        against the exact u32/entry consumption. Returns
+        (mode, opcnt, ops0, ops, entcnt) or None.
+
+        The declared ONES/entry counts make this a hard oracle: a candidate
+        only fits when `thr` decoded ops consume exactly opcnt words and
+        declare exactly the entry count that follows."""
+        if pos_opcnt < 0 or pos_opcnt + 8 > len(w):
+            return None
+        opcnt = i32(w, pos_opcnt)
+        if not 0 <= opcnt <= 0x20000:
+            return None
+        ops0 = pos_opcnt + 4
+        if ops0 + opcnt * 4 + 4 > len(w):
+            return None
+        opsl = [u32(w, ops0 + 4 * k) for k in range(opcnt)]
+        for trymode in ("sig", "nosig"):
+            jj = 0
+            ents = 0
+            okmode = True
+            for _ in range(thr):
+                need = 2 if trymode == "sig" else 1
+                if jj + need > opcnt:
+                    okmode = False
+                    break
+                op = opsl[jj]
+                jj += need
+                if (op & 0x1800) == 0x1800:
+                    if jj >= opcnt:
+                        okmode = False
+                        break
+                    jj += 1
+                if (op >> 16) == 0xFFFF:
+                    if jj >= opcnt:
+                        okmode = False
+                        break
+                    jj += 1
+                ents += (
+                    ((op & 0x100) and 1) + ((op & 0x200) and 1) + ((op & 0x400) and 1)
+                )
+            if okmode and jj == opcnt:
+                entcnt = i32(w, ops0 + opcnt * 4)
+                if ents == entcnt:
+                    return (trymode, opcnt, ops0, opsl, entcnt)
+        return None
+
     ktcnt = r.i32()
-    opcnt = r.i32()
-    ops = [r.u32() for _ in range(opcnt)]
-    entcnt = r.i32()
-    entries = r.raw(entcnt * 5)
+    p_opcnt = r.p
+    fit = _grammar_fit(p_opcnt)
+    probed = 0
+    if fit is None:
+        # Some wires carry one or two extra prologue words between the counts
+        # (typed-argument prototype records) that the reader does not model,
+        # leaving the default opcnt misaligned — a value with bit31 set or a
+        # negative i32. The grammar oracle locates the real opcnt in a small
+        # window instead of blindly trusting the fixed offset.
+        for extra in (2, 1, 3, 4, -1, -2, -3, -4, 5, 6):
+            fit = _grammar_fit(p_opcnt + 4 * extra)
+            if fit is not None:
+                probed = extra
+                break
+    if probed:
+        # a shifted op-run is accepted only via the exact-consumption
+        # oracle; say so, since a coincidental fit would misalign silently
+        print(
+            f"wire: note: op-run located at shifted offset ({probed:+d} words)",
+            file=sys.stderr,
+        )
+    if fit is not None:
+        mode, opcnt, ops0, ops, entcnt = fit
+        r.p = ops0 + opcnt * 4
+        entcnt = r.i32()
+        entries = r.raw(entcnt * 5)
+    else:
+        r.p = p_opcnt
+        opcnt = r.i32()
+        ops = [r.u32() for _ in range(opcnt)] if opcnt > 0 else []
+        entcnt = r.i32()
+        entries = r.raw(entcnt * 5)
+        mode = "sig"
     lc = u32(hdr, 0x28)
     lits = r.raw(lc << 4)
     lr = u32(hdr, 0x4C)
@@ -204,36 +281,7 @@ def parse_wire(
         zv.append(e)
     sf = u32(hdr, 0x70)
 
-    # ---- grammar mode auto-detection (exact u32/entry consumption) ----
-    mode = "sig"
-    modeok = False
-    for trymode in ("sig", "nosig"):
-        jj = 0
-        ents = 0
-        okmode = True
-        for i in range(thr):
-            need = 2 if trymode == "sig" else 1
-            if jj + need > opcnt:
-                okmode = False
-                break
-            op = ops[jj]
-            jj += need
-            if (op & 0x1800) == 0x1800:
-                if jj >= opcnt:
-                    okmode = False
-                    break
-                jj += 1
-            if (op >> 16) == 0xFFFF:
-                if jj >= opcnt:
-                    okmode = False
-                    break
-                jj += 1
-            ents += ((op & 0x100) and 1) + ((op & 0x200) and 1) + ((op & 0x400) and 1)
-        if okmode and jj == opcnt and ents == entcnt:
-            mode = trymode
-            modeok = True
-            break
-    if not modeok:
+    if fit is None:
         print(
             f"wire: WARNING: neither grammar fits thr={thr} opcnt={opcnt} entcnt={entcnt}; "
             "node decode is UNRELIABLE",

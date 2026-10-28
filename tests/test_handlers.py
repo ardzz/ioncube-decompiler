@@ -222,6 +222,49 @@ def test_handle_exception_is_bookkeeping():
     assert l.bookkept == 1 and l.unknown == 0
 
 
+def test_handle_exception_assign_alias():
+    """A 149 with a live CV target + value operand is really an ASSIGN
+    (ktab nosig aliasing) — it must not degrade to bookkeeping."""
+    l = mk(
+        [(149, {"op1": (8, 0), "op2": (1, 0)}, {}, 0)],
+        zvals=[{"type": 6, "str": b"v"}],
+        cv={0: "x"},
+    )
+    assert l.op[0] == 22
+    for i in range(l.thr):
+        emit_node(l, i, l.thr)
+    assert "$x = 'v';" in "".join(l.out)
+
+
+def test_handle_exception_assign_dim_alias():
+    """The same 149 followed by OP_DATA is an ASSIGN_DIM, not an ASSIGN."""
+    l = mk(
+        [
+            (149, {"op1": (8, 0), "op2": (1, 0)}, {}, 0),
+            (137, {"op1": (1, 1)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"k"}, {"type": 6, "str": b"v"}],
+        cv={0: "arr"},
+    )
+    assert l.op[0] == 23
+    emit_node(l, 0, l.thr)
+    assert "$arr['k'] = 'v';" in "".join(l.out)
+
+
+def test_handle_exception_with_res_stays_149():
+    """A 149 carrying a result temp is a value op (the IS_EQUAL family
+    with a CV left operand has this exact shape) — it must NOT be
+    rewritten into a fabricated assignment."""
+    l = mk(
+        [(149, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 4, "a": 5, "b": 0}],
+        cv={0: "x"},
+    )
+    assert l.op[0] == 149
+    emit_node(l, 0, l.thr)
+    assert "$x = 5;" not in "".join(l.out)
+
+
 def test_bind_static():
     l = mk([(181, {"op1": (8, 2)}, {}, 0)], cv={2: "count"})
     emit_node(l, 0, l.thr)

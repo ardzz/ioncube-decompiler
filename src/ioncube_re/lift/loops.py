@@ -63,7 +63,7 @@ def bottom_tested_while(ctx: LiftContext, i: int, t: int, end: int) -> int | Non
         # at header-render time; a pure cond emits nothing here)
         emit_region(ctx, t, j)
         condT = unwrap(ctx.render.ch(ctx.render.ex_op1(ctx.nodes[j])))
-        initV = ctx.render.ex(initN, "op2")
+        initV = ctx.render.assigned_value(initN, "op2")
         ctx.line(ctx.nodes[i])
         ctx.w(
             f"for ({ctx.cv_name(incCV)} = "

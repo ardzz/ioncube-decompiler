@@ -47,10 +47,10 @@ def _assign(ctx: LiftContext, i: int, end: int) -> int:
         ctx.bk(i)
         return i + 1
     ctx.line(n)
-    v = r.ch(r.ex_op2(n))
+    v = r.ch(r.assigned_value(n, "op2"))
     e = n.ent.get("res")
     if e and (e.kind & 6):
-        ctx.tempExpr[n.res // 16] = r.ch(r.ex_op2(n))
+        ctx.tempExpr[n.res // 16] = r.ch(r.assigned_value(n, "op2"))
     # a source slot with no recorded def renders $Vn: the encoder's lowered
     # read (FETCH_LIST_R et al.) sat DIRECTLY before this assign and its
     # result temp was never referenced again — that orphan is the value
@@ -220,14 +220,7 @@ def _assign_op(ctx: LiftContext, i: int, end: int) -> int:
             if e is not None and (e.kind & 1) and e.raw < len(ctx.zvals):
                 z = ctx.zvals[e.raw]
                 if (z.get("type") & 0xFF) == 4:
-                    if z.get("b"):
-                        v = ((z["b"] & 0xFFFFFFFF) << 32) | (z["a"] & 0xFFFFFFFF)
-                        if v >= 1 << 63:
-                            v -= 1 << 64
-                    else:
-                        v = z["a"]
-                    val = str(v - 2)
-                    ctx.w(lhs + f" {sym}= " + val + ";")
+                    ctx.w(lhs + f" {sym}= " + r.ch(r.assigned_value(n, "op2")) + ";")
                     ctx.emitted += 1
                     return i + (2 if dataN is not None else 1)
         ctx.w(lhs + f" {sym}= " + r.ch(val) + ";")
@@ -398,7 +391,10 @@ def _isset(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     op = ctx.op[i]
     r = ctx.render
-    fn = "empty" if (n.ext & 2) else "isset"
+    # ext carries the ISSET_ISEMPTY flag (ZEND_ISEMPTY): bit0 in the
+    # production generation (empty -> ext=1), bit1 in the captured corpus
+    # (empty -> ext=2); either set means empty.
+    fn = "empty" if (n.ext & 3) else "isset"
     if op == 115:  # _DIM_OBJ: op1[expr][dim]
         arg = r.ch(r.ex_op1(n)) + "[" + r.ch(r.ex_op2(n)) + "]"
     elif op == 114:  # _VAR: op1 may BE the name (empty($_POST) on a superglobal)

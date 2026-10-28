@@ -26,6 +26,8 @@ from ..wire import gt_check, gt_sections, parse_wire
 from .signature import arg_names, arg_specs, cv_names, fn_name_of, param_list
 from .sources import best_pair, capture_pairs, m5_sample_dir, offline_parse
 from .wires import (
+    class_like_names,
+    class_name_hint,
     classrec_strings,
     desc_strings,
     pool_strings,
@@ -114,13 +116,17 @@ def lift_file(
     subMeta = []
     for off, size, r in subs:
         rec = desc_strings(stream, prevEnd, off - 4)
+        # the descriptor stores the DECLARED record size (u32 before the
+        # wire), which covers any trailing nested-record region; the seed
+        # lookup must match that word, not the wire end scan_wires returns
+        decl = u32(stream, off - 4) if off >= 4 else size
         subMeta.append(
             (
                 r,
                 rec,
                 stream[off : off + size],
                 off,
-                record_seeds(stream, prevEnd, off - 4, size),
+                record_seeds(stream, prevEnd, off - 4, decl),
             )
         )
         prevEnd = off + size
@@ -133,13 +139,14 @@ def lift_file(
         prevN = mainR["end"]
         for off, size, r in nested:
             rec = desc_strings(mainWire, prevN, off - 4)
+            decl = u32(mainWire, off - 4) if off >= 4 else size
             subMeta.append(
                 (
                     r,
                     rec,
                     mainWire[off : off + size],
                     off,
-                    record_seeds(mainWire, prevN, off - 4, size),
+                    record_seeds(mainWire, prevN, off - 4, decl),
                 )
             )
             prevN = off + size
@@ -229,6 +236,10 @@ def lift_file(
             fn = ctx.fnName if ctx.fnName is not None else "{fn}"
             specs, ret = arg_specs(r)
             ctx.meta["hasRetType"] = bool(ret) and ret != "void"
+            # a PHP function name cannot be namespaced: `function A\B()` is a
+            # parse error, keep the leaf (`Ns\...\{closure}` -> `{closure}`)
+            if "\\" in fn:
+                fn = fn.rsplit("\\", 1)[-1]
             if fn in _PHP_RESERVED_FNS and not cd:
                 # a free function shadowing a PHP builtin (`extract`) is a
                 # compile error — suffix keeps the listing parseable
@@ -286,7 +297,8 @@ def lift_file(
         prevN = mainR["end"]
         for off, size, r in scan_wires(mainWire, mainR["end"]):
             if fn_name_of(r) == "{closure}":
-                seeds = record_seeds(mainWire, prevN, off - 4, size)
+                decl = u32(mainWire, off - 4) if off >= 4 else size
+                seeds = record_seeds(mainWire, prevN, off - 4, decl)
                 der = offline_parse(
                     mainWire[off : off + size],
                     seeds,
@@ -319,6 +331,10 @@ def lift_file(
 
     # ---- production class skeleton ----
     prodClassOpen = False
+    prodQueue: list[tuple[str, str | None]] = []
+    prodSeen: set[str] = set()
+    prodSerial = 0
+    prodQueueNames: list[str] = []
     if isProd:
         tailStart = boff + bsize
         if (
@@ -329,6 +345,17 @@ def lift_file(
             rec = classrec_strings(stream, tailStart, tailStart + 0x60)
             ps = [s.decode("latin-1") for s in pool_strings(mainR["pool"])]
             cls = rec[0] if rec else (ps[1] if len(ps) > 1 else "?")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", cls):
+                # the fixed 0x60 window and the pool can both miss the class
+                # record (an anonymous-class or property record can precede
+                # it); the record whose leaf matches this file's basename is
+                # the declaring class
+                leaf = os.path.basename(path)
+                if leaf.endswith(".php"):
+                    leaf = leaf[:-4]
+                hint = class_name_hint(stream, tailStart, leaf)
+                if hint is not None:
+                    cls = hint
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", cls):
                 # unrecoverable class name: no skeleton (the bare
                 # `class ? {` form is a parse error); the components emit
@@ -351,6 +378,13 @@ def lift_file(
                 ):
                     parent = ps[0]
             if cls is not None:
+                # a parent recovered from the pool can be the class itself in
+                # a different case (Captcha extends whmcs\utility\captcha) —
+                # extending yourself is not allowed, fall back to a base
+                if parent is not None and parent.lower().lstrip(
+                    "\\"
+                ) == cls.lower().lstrip("\\"):
+                    parent = None
                 # a namespaced class cannot be declared FQ (`class A\B` is a
                 # syntax error): split off a `namespace` declaration, the bare
                 # class name, and a leading-backslash FQ parent
@@ -364,17 +398,55 @@ def lift_file(
                 doc = tail_doccomment(stream, tailStart)
                 if doc is not None:
                     out.append("\n" + doc + "\n")
-                out.append(
-                    f"\nclass {cls}"
-                    + (f" extends {parent}" if parent else "")
-                    + (
-                        " { // class component: %d nodes" % mainR["thr"]
-                        if debug
-                        else " {"
+
+                def _open_class(leaf: str, ext: str | None = None) -> None:
+                    # no invented parent: when no parent was recovered the
+                    # class stands alone (a body using parent:: degrades
+                    # visibly instead of silently extending \stdClass,
+                    # which would change get_parent_class()/instanceof)
+                    out.append(
+                        f"\nclass {leaf}"
+                        + (f" extends {ext}" if ext else "")
+                        + (
+                            " { // class component: %d nodes" % mainR["thr"]
+                            if debug
+                            else " {"
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
+
+                # Files that declare more than one class (a leading anonymous
+                # or nested class encoded before/among the main class) repeat
+                # method names across component groups. Merging them into one
+                # class is a compile error, so split at the first repeated
+                # name and name the groups from the tail class records.
+                fnNames = [fn_name_of(sm[0]) for sm in subMeta]
+                # closures repeat routinely inside ONE class; only real
+                # method names mark a second class group
+                fnNames = [f for f in fnNames if f and not f.endswith("{closure}")]
+                multi = len(fnNames) != len(set(fnNames))
+                allLeafs: list[str] = []
+                seenLeaf = {cls}
+                for nm in class_like_names(stream, tailStart):
+                    lf = nm.split("@")[0].rsplit("\\", 1)[-1]
+                    if (
+                        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", lf)
+                        and lf not in seenLeaf
+                    ):
+                        seenLeaf.add(lf)
+                        allLeafs.append(lf)
+                tailLeafs = allLeafs if multi else []
+                firstAlt = tailLeafs[0] if (multi and tailLeafs) else None
+                if firstAlt is not None and firstAlt != cls:
+                    # the first component group is the leading class; keep the
+                    # main class (and remaining names) for later groups
+                    prodQueue = [(cls, parent)] + [(lf, None) for lf in tailLeafs[1:]]
+                    _open_class(firstAlt)
+                else:
+                    prodQueue = [(lf, None) for lf in tailLeafs]
+                    _open_class(cls, parent)
                 prodClassOpen = True
+                prodQueueNames = [cls] + allLeafs
 
     # ---- eval class/enum recovery ----
     evalEnum: dict | None = None
@@ -520,6 +592,21 @@ def lift_file(
         label = f"function {classRec + '::' if classRec else ''}" + (
             fn if fn is not None else f"@{off:#x}"
         )
+        # multi-class production files: a repeated method name marks a new
+        # class group (anonymous/nested classes are encoded interleaved)
+        if prodClassOpen and fn is not None and not fn.endswith("{closure}"):
+            if fn in prodSeen:
+                out.append("}\n")
+                if prodQueue:
+                    nxt, nxtExt = prodQueue.pop(0)
+                else:
+                    prodSerial += 1
+                    nxt, nxtExt = f"{cls}_{prodSerial}", None
+                _open_class(nxt, nxtExt)
+                prodSeen = set()
+            prodSeen.add(fn)
+        if prodClassOpen:
+            meta["classNames"] = [cls] + prodQueueNames
         meta["classDepth"] = bool(openClass is not None or prodClassOpen)
         if not isProd and evalEnum and evalEnum.get("promoted") and fn == "__construct":
             from .classrec import promoted_param
@@ -539,6 +626,13 @@ def lift_file(
         out.append("}\n")
     if prodClassOpen:
         out.append("} // end class\n" if debug else "}\n")
+    # a file-level `namespace` must precede every other statement; the main
+    # component's top-level code (define/require_once) is emitted first, so
+    # move a late namespace up to just after `<?php`
+    for ix in range(2, len(out)):
+        if out[ix].lstrip().startswith("namespace "):
+            out.insert(1, out.pop(ix))
+            break
     return {"text": "".join(out), "gt": gt_report, "stderr": stderr}
 
 

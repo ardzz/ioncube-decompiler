@@ -261,6 +261,25 @@ def _alias_149(ctx) -> None:
             and ctx.op[n.i - 1] in (68, 100) + _INIT + _SEND
         ):
             ctx.op[n.i] = 60
+            continue
+
+        # value-op ASSIGN aliases: op1 = a CV target, op2 = the value, and
+        # NO result temp — a statement-form write. A 149 carrying a res is
+        # a value op (the IS_EQUAL/IS_IDENTICAL family with a CV left
+        # operand has exactly this shape) and stays 149: rewriting it
+        # would fabricate `$x = <const>;` and drop the comparison result.
+        # A following OP_DATA means the write is into a dim/obj
+        # (ASSIGN_DIM); otherwise it is a scalar ASSIGN. Both were dropped
+        # outright while left at 149 (delimCode = dechex(...),
+        # $bankDetails['bankcode'] = ...).
+        if (
+            e1 is not None
+            and e1.kind == 8
+            and e2 is not None
+            and e2.kind in (1, 2, 4, 6, 8)
+            and _unused(n, "res")
+        ):
+            ctx.op[n.i] = 23 if nop == 137 else 22
 
 
 # ---- jump-target calibration ----
@@ -367,7 +386,10 @@ def _tc_records(ctx) -> list[tuple[int, int]]:
     for i in range(tc):
         s = u32(b, i * 16)
         h = u32(b, i * 16 + 4)
-        if 0 < s < ctx.thr and 0 < h < ctx.thr:
+        # A body with no prologue RECV/HANDLE_EXCEPTION nodes starts the try
+        # region at node 0, so keep `s == 0` (functions with parameters get a
+        # 1-2 node prologue and a nonzero start).
+        if 0 <= s < ctx.thr and 0 < h < ctx.thr:
             out.append((s, h))
     return out
 

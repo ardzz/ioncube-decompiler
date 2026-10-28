@@ -85,6 +85,6 @@ def _pre_incdec_obj(ctx: LiftContext, i: int, end: int) -> int:
 def _isset_prop(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     r = ctx.render
-    fn = "empty" if (n.ext & 2) else "isset"
+    fn = "empty" if (n.ext & 3) else "isset"
     arg = r.obj(r.ex_op1(n)) + "->" + prop_txt(r.ch(r.ex_op2(n)))  # bare prop
     return ctx.def_temp(n, fn + "(" + arg + ")", i)

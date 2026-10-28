@@ -50,8 +50,15 @@ def render_type(ctrl: int, classnames: list[str] | None = None) -> str:
         return ""
     if len(bits) == 1:
         return bits[0]
-    if set(bits) == {"false", "true"}:
-        return "bool"
+    if "false" in bits and "true" in bits:
+        # PHP requires true|false to be spelled `bool`; a leading null makes
+        # it nullable (`?bool`).
+        rest = [b for b in bits if b not in ("false", "true")]
+        if rest == ["null"]:
+            return "?bool"
+        if not rest:
+            return "bool"
+        return "|".join(rest + ["bool"])
     if bits[0] == "null" and len(bits) == 2:
         return "?" + bits[1]
     return "|".join(bits)
@@ -206,9 +213,33 @@ def cv_names(
                 p = p[1:]
             run.append(p.decode("latin-1"))
         if is_fn:
-            for k in range(min(numCV, len(run))):
-                nm = run[len(run) - min(numCV, len(run)) + k]
-                names[k] = nm
+            # The pool layout is [fnName][argnames][argnames][cvnames...]
+            # [literals...]: the arg-name block repeats verbatim (the
+            # params are also CVs 0..numArgs-1), and the CV run starts at
+            # that repetition. Taking the LAST numCV entries let trailing
+            # identifier-like literals steal slots (getBillingCycleDays);
+            # taking the first block misaligns by numArgs (getTaxByUserId:
+            # [userid level userid level results ...]). Locate the repeat;
+            # without arg names there is nothing to anchor on, so fall
+            # back to the tail.
+            # anchor on the run's own arg block (hdr arg count, widened
+            # by the pre-record arg names — fixtures may carry only one)
+            na = max(u32(r["hdr"], 0x14), len(arg_names(r)))
+            base = None
+            if na and len(run) > na:
+                head = run[:na]
+                for k in range(1, len(run) - na + 1):
+                    if run[k : k + na] == head:
+                        base = k
+                        break
+            if base is None:
+                take = min(numCV, len(run))
+                for k in range(take):
+                    names[k] = run[len(run) - take + k]
+            else:
+                for k in range(numCV):
+                    if base + k < len(run):
+                        names[k] = run[base + k]
         else:
             for k in range(len(run)):
                 names[k] = run[k]

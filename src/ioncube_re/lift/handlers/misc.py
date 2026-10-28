@@ -58,7 +58,10 @@ def _include(ctx: LiftContext, i: int, end: int) -> int:
         3: "include_once",
         5: "require_once",
     }
-    ctx.w(k.get(n.ext, "include") + " " + ctx.render.ch(ctx.render.ex_op1(n)) + ";")
+    expr = ctx.render.ch(ctx.render.ex_op1(n))
+    kw = k.get(n.ext, "include")
+    # `eval` requires parentheses; the include family is valid without
+    ctx.w(f"{kw}({expr});" if kw == "eval" else f"{kw} {expr};")
     ctx.emitted += 1
     return i + 1
 

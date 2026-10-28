@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ..opcodes import OPNAMES
 from .model import LoopInfo, LiftContext, _PLUMBING, _PURE
-from .operand import bare, unwrap
+from .operand import bare, unwrap, zval_name
 
 # the region between a short-circuit jump and its target must hold only
 # these pure expression defs for the &&/|| merge to fire (emitIf's set,
@@ -39,7 +39,15 @@ def emit_try(ctx: LiftContext, i: int, tb: tuple[int, int]) -> int:
     catchEntry = h - 1  # catch-skip JMP before the CATCH bind
     after = ctx.jt.get(catchEntry, min(h + 8, ctx.thr))
     catchN = ctx.nodes[h]
-    cls = bare(ctx.render.ch(ctx.render.ex_op1(catchN)))
+    # the class operand is a NAME, not a string literal: the zval form escapes
+    # backslashes (`Vendor\\Client`), so resolve it like INSTANCEOF does and
+    # only fall back to the rendered (quote-stripped) form.
+    ce = catchN.ent.get("op1")
+    cls = None
+    if ce is not None and ce.kind == 1 and ce.raw < len(ctx.zvals):
+        cls = zval_name(ctx.zvals[ce.raw])
+    if cls is None:
+        cls = bare(ctx.render.ch(ctx.render.ex_op1(catchN)))
     e = catchN.ent.get("res")
     var = ctx.cv_name(e.raw) if e and e.kind == 8 else "$e"
     ctx.line(ctx.nodes[s])
@@ -123,8 +131,18 @@ def _jmp_return(
     tn = ctx.nodes[tnode]
     v = ctx.render.ex_op1(tn)
     isNull = v is None or v == "null"
+    # the unreachable epilogue after an inlined `return X;` duplicates the
+    # return — skip it so a typed function keeps a single return path
+    prev = next((ln.strip() for ln in reversed(ctx.out) if ln.strip()), "")
+    if isNull and prev.startswith("return"):
+        return ret if ret < end else end
     ctx.line(n)
-    ctx.w(f"return {'' if isNull else unwrap(ctx.render.ch(v))}; /*{tag} */")
+    if isNull:
+        # a typed function's bare `return;` is a compile error
+        body = "return null;" if ctx.meta.get("hasRetType") else "return;"
+        ctx.w(f"{body} /*{tag} */")
+    else:
+        ctx.w(f"return {unwrap(ctx.render.ch(v))}; /*{tag} */")
     ctx.emitted += 1
     return ret if ret < end else end
 

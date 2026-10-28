@@ -116,13 +116,17 @@ def lift_file(
     subMeta = []
     for off, size, r in subs:
         rec = desc_strings(stream, prevEnd, off - 4)
+        # the descriptor stores the DECLARED record size (u32 before the
+        # wire), which covers any trailing nested-record region; the seed
+        # lookup must match that word, not the wire end scan_wires returns
+        decl = u32(stream, off - 4) if off >= 4 else size
         subMeta.append(
             (
                 r,
                 rec,
                 stream[off : off + size],
                 off,
-                record_seeds(stream, prevEnd, off - 4, size),
+                record_seeds(stream, prevEnd, off - 4, decl),
             )
         )
         prevEnd = off + size
@@ -135,13 +139,14 @@ def lift_file(
         prevN = mainR["end"]
         for off, size, r in nested:
             rec = desc_strings(mainWire, prevN, off - 4)
+            decl = u32(mainWire, off - 4) if off >= 4 else size
             subMeta.append(
                 (
                     r,
                     rec,
                     mainWire[off : off + size],
                     off,
-                    record_seeds(mainWire, prevN, off - 4, size),
+                    record_seeds(mainWire, prevN, off - 4, decl),
                 )
             )
             prevN = off + size
@@ -292,7 +297,8 @@ def lift_file(
         prevN = mainR["end"]
         for off, size, r in scan_wires(mainWire, mainR["end"]):
             if fn_name_of(r) == "{closure}":
-                seeds = record_seeds(mainWire, prevN, off - 4, size)
+                decl = u32(mainWire, off - 4) if off >= 4 else size
+                seeds = record_seeds(mainWire, prevN, off - 4, decl)
                 der = offline_parse(
                     mainWire[off : off + size],
                     seeds,
@@ -375,7 +381,9 @@ def lift_file(
                 # a parent recovered from the pool can be the class itself in
                 # a different case (Captcha extends whmcs\utility\captcha) —
                 # extending yourself is not allowed, fall back to a base
-                if parent is not None and parent.lower().lstrip("\\") == cls.lower().lstrip("\\"):
+                if parent is not None and parent.lower().lstrip(
+                    "\\"
+                ) == cls.lower().lstrip("\\"):
                     parent = None
                 # a namespaced class cannot be declared FQ (`class A\B` is a
                 # syntax error): split off a `namespace` declaration, the bare
@@ -392,10 +400,10 @@ def lift_file(
                     out.append("\n" + doc + "\n")
 
                 def _open_class(leaf: str, ext: str | None = None) -> None:
-                    # a class body may use `parent::`; if no parent was
-                    # recovered an explicit base keeps that valid
-                    if ext is None:
-                        ext = "\\stdClass"
+                    # no invented parent: when no parent was recovered the
+                    # class stands alone (a body using parent:: degrades
+                    # visibly instead of silently extending \stdClass,
+                    # which would change get_parent_class()/instanceof)
                     out.append(
                         f"\nclass {leaf}"
                         + (f" extends {ext}" if ext else "")
@@ -413,7 +421,9 @@ def lift_file(
                 # class is a compile error, so split at the first repeated
                 # name and name the groups from the tail class records.
                 fnNames = [fn_name_of(sm[0]) for sm in subMeta]
-                fnNames = [f for f in fnNames if f]
+                # closures repeat routinely inside ONE class; only real
+                # method names mark a second class group
+                fnNames = [f for f in fnNames if f and not f.endswith("{closure}")]
                 multi = len(fnNames) != len(set(fnNames))
                 allLeafs: list[str] = []
                 seenLeaf = {cls}

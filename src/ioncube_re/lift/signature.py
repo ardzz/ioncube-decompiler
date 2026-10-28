@@ -213,19 +213,33 @@ def cv_names(
                 p = p[1:]
             run.append(p.decode("latin-1"))
         if is_fn:
-            # The pool layout is [fnName][argnames][cvnames...][literals...]:
-            # CV slots 0..numArgs-1 repeat the parameter names, and the
-            # trailing pool literals are identifier-like too, so the CV run
-            # must start right after the arg names -- taking the last numCV
-            # entries let literals steal slots (getBillingCycleDays) and
-            # shifted every name by one (convertStateToCode).
-            numArgs = max(u32(r["hdr"], 0x14), len(arg_names(r)))
-            # `run` already excludes the docblock+fnName prefix, so it starts
-            # at the argument names.
-            base = numArgs if r["fnrec"] is not None else 0
-            for k in range(numCV):
-                if base + k < len(run):
-                    names[k] = run[base + k]
+            # The pool layout is [fnName][argnames][argnames][cvnames...]
+            # [literals...]: the arg-name block repeats verbatim (the
+            # params are also CVs 0..numArgs-1), and the CV run starts at
+            # that repetition. Taking the LAST numCV entries let trailing
+            # identifier-like literals steal slots (getBillingCycleDays);
+            # taking the first block misaligns by numArgs (getTaxByUserId:
+            # [userid level userid level results ...]). Locate the repeat;
+            # without arg names there is nothing to anchor on, so fall
+            # back to the tail.
+            # anchor on the run's own arg block (hdr arg count, widened
+            # by the pre-record arg names — fixtures may carry only one)
+            na = max(u32(r["hdr"], 0x14), len(arg_names(r)))
+            base = None
+            if na and len(run) > na:
+                head = run[:na]
+                for k in range(1, len(run) - na + 1):
+                    if run[k : k + na] == head:
+                        base = k
+                        break
+            if base is None:
+                take = min(numCV, len(run))
+                for k in range(take):
+                    names[k] = run[len(run) - take + k]
+            else:
+                for k in range(numCV):
+                    if base + k < len(run):
+                        names[k] = run[base + k]
         else:
             for k in range(len(run)):
                 names[k] = run[k]

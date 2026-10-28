@@ -62,7 +62,9 @@ def scan_wires(stream: bytes, start: int) -> list[tuple[int, int, dict]]:
     descriptors): those nested wires are found by the outer byte scan and
     their descriptors live between the outer wire's end and the nested
     record, so the wire end — not the declared size — is what keeps the
-    per-record descriptor ranges contiguous."""
+    per-record descriptor ranges contiguous. Note the descriptor's stored
+    size word is the DECLARED size; seed lookup must read it from the
+    stream (`u32(stream, off - 4)`), not reuse this wire size."""
     found = []
     n = len(stream)
     p = start
@@ -195,7 +197,9 @@ __all__ = [
 ]
 
 
-def class_name_hint(stream: bytes, start: int, leaf: str, limit: int | None = None) -> str | None:
+def class_name_hint(
+    stream: bytes, start: int, leaf: str, limit: int | None = None
+) -> str | None:
     """Recover the declared class name from the tail descriptor records.
 
     The encoder writes a record per declared symbol; the class record is a

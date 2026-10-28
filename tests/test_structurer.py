@@ -584,15 +584,17 @@ def test_foreach_key_in_temp_fold():
 
 @requires_workspace
 def test_corpus_while_priming_taxgateway():
-    """getTaxByUserId: `while ($taxLevelVAT = $iso->fetch())` lifts with the
+    """getTaxByUserId: `while ($row = $results->fetch())` lifts with the
     priming read + the body-end re-read (M5C-LIFTER §5.6's commented
-    back-edge pattern)."""
+    back-edge pattern). (The pre-fix CV map named the query result `$iso`
+    and the row `$taxLevelVAT`; the pool arg block repeats, and the CV
+    run starts at the repetition.)"""
     from ioncube_re.lift import lift_file
 
     r = lift_file(f"{CE}/modules/billing/models/TaxGateway.php")
     t = r["text"]
-    assert t.count("$taxLevelVAT = $iso->fetch();") == 2
-    assert "while ($taxLevelVAT) {" in t
+    assert t.count("$row = $results->fetch();") == 2
+    assert "while ($row) {" in t
     assert "loop back-edge) */" not in t or "JMPNZ" not in t
 
 
@@ -612,16 +614,16 @@ def test_corpus_switch_seterror_blesta():
     assert "if (!($T3))" not in t
 
 
-@requires_workspace
 def test_corpus_ternary_in_array_literal():
     """TaxGateway parseTaxRule: `($data['vat'] == 1 ? true : false)` folds
-    into the array literal (the empty if/else arms vanish)."""
+    into the array literal (the empty if/else arms vanish). (The arg is
+    `$data`; the returned array is the separate `$return` CV.)"""
     from ioncube_re.lift import lift_file
 
     r = lift_file(f"{CE}/modules/billing/models/TaxGateway.php")
     t = r["text"]
-    assert "'vat' => ($return['vat'] == 1 ? true : false)" in t
-    assert "'allcountries' => ($return['countryiso'] == '_ALL' ? true : false)" in t
+    assert "'vat' => ($data['vat'] == 1 ? true : false)" in t
+    assert "'allcountries' => ($data['countryiso'] == '_ALL' ? true : false)" in t
 
 
 @requires_workspace

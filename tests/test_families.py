@@ -239,6 +239,22 @@ def test_isset_empty_families():
     assert l.tempExpr[9] == "empty($z)"
 
 
+def test_isset_empty_prop_bit0():
+    """ISSET_ISEMPTY_PROP_OBJ (148) honours the bit0 generation too."""
+    l = mk(
+        [
+            (148, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (148, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 8 * 16}, 1),
+        ],
+        zvals=[{"type": 6, "str": b"p"}],
+        cv={0: "o"},
+    )
+    emit_node(l, 0, l.thr)
+    assert l.tempExpr[7] == "isset($o->p)"
+    emit_node(l, 1, l.thr)
+    assert l.tempExpr[8] == "empty($o->p)"
+
+
 def test_unset_var_and_bind_global():
     l = mk(
         [(74, {"op1": (8, 0)}, {}, 0), (168, {"op2": (8, 1)}, {}, 0)],

@@ -4,8 +4,6 @@ ops that store a string into the node's res temp slot via ``ctx.def_temp``
 
 from __future__ import annotations
 
-import re
-
 from ..model import LiftContext
 from ..operand import bare, concat_pair, zval_name
 from ..registry import opcode_handler
@@ -92,12 +90,8 @@ def _instanceof(ctx: LiftContext, i: int, end: int) -> int:
         cls = zval_name(ctx.zvals[e2.raw])
     if cls is None:
         cls = bare(r.ch(r.ex_op2(n)))
-    if re.fullmatch(r"-?\d+", cls) and e2 is not None and e2.kind == 0:
-        # an extended class operand the wire left as a kind-0 sentinel; pick
-        # a real class name declared by the file rather than the bare int
-        names = ctx.meta.get("classNames") or []
-        if names:
-            cls = names[(e2.raw >> 1) % len(names)]
+    # an unresolved kind-0 class operand renders as the bare value: the
+    # lint gate rejects it visibly rather than guessing a declared class
     return ctx.def_temp(n, r.ch(r.ex_op1(n)) + " instanceof " + cls, i)
 
 

@@ -174,6 +174,7 @@ def parse_wire(
             f"note: fn-info entries present ({fi}) — reader not modeled",
             file=sys.stderr,
         )
+
     def _grammar_fit(pos_opcnt: int):
         """Read an opcnt candidate at `pos_opcnt` and test both grammars
         against the exact u32/entry consumption. Returns
@@ -212,7 +213,9 @@ def parse_wire(
                         okmode = False
                         break
                     jj += 1
-                ents += ((op & 0x100) and 1) + ((op & 0x200) and 1) + ((op & 0x400) and 1)
+                ents += (
+                    ((op & 0x100) and 1) + ((op & 0x200) and 1) + ((op & 0x400) and 1)
+                )
             if okmode and jj == opcnt:
                 entcnt = i32(w, ops0 + opcnt * 4)
                 if ents == entcnt:
@@ -222,6 +225,7 @@ def parse_wire(
     ktcnt = r.i32()
     p_opcnt = r.p
     fit = _grammar_fit(p_opcnt)
+    probed = 0
     if fit is None:
         # Some wires carry one or two extra prologue words between the counts
         # (typed-argument prototype records) that the reader does not model,
@@ -231,14 +235,23 @@ def parse_wire(
         for extra in (2, 1, 3, 4, -1, -2, -3, -4, 5, 6):
             fit = _grammar_fit(p_opcnt + 4 * extra)
             if fit is not None:
+                probed = extra
                 break
+    if probed:
+        # a shifted op-run is accepted only via the exact-consumption
+        # oracle; say so, since a coincidental fit would misalign silently
+        print(
+            f"wire: note: op-run located at shifted offset ({probed:+d} words)",
+            file=sys.stderr,
+        )
     if fit is not None:
         mode, opcnt, ops0, ops, entcnt = fit
         r.p = ops0 + opcnt * 4
         entcnt = r.i32()
         entries = r.raw(entcnt * 5)
     else:
-        opcnt = i32(w, p_opcnt)
+        r.p = p_opcnt
+        opcnt = r.i32()
         ops = [r.u32() for _ in range(opcnt)] if opcnt > 0 else []
         entcnt = r.i32()
         entries = r.raw(entcnt * 5)
@@ -396,7 +409,6 @@ def parse_wire(
         "opcnt": opcnt,
         "entcnt": entcnt,
         "ops": ops,
-        "entries": entries,
         "nodes": nodes,
         "pool": pool,
         "zvals": zv,

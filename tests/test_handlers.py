@@ -251,6 +251,20 @@ def test_handle_exception_assign_dim_alias():
     assert "$arr['k'] = 'v';" in "".join(l.out)
 
 
+def test_handle_exception_with_res_stays_149():
+    """A 149 carrying a result temp is a value op (the IS_EQUAL family
+    with a CV left operand has this exact shape) — it must NOT be
+    rewritten into a fabricated assignment."""
+    l = mk(
+        [(149, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
+        zvals=[{"type": 4, "a": 5, "b": 0}],
+        cv={0: "x"},
+    )
+    assert l.op[0] == 149
+    emit_node(l, 0, l.thr)
+    assert "$x = 5;" not in "".join(l.out)
+
+
 def test_bind_static():
     l = mk([(181, {"op1": (8, 2)}, {}, 0)], cv={2: "count"})
     emit_node(l, 0, l.thr)

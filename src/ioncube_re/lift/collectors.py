@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 
 from .model import LiftContext
-from .operand import unwrap
+from .operand import class_ref, unwrap
 
 # the SEND tuple (SEND_FUNC_ARG 183 = the ungarbled +2 form, §7.5)
 _SEND = (65, 116, 117, 66, 67, 106, 50, 165, 119, 120, 183)
@@ -104,7 +104,7 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
             # keeps a `self` fallback — `/*class-N*/::` is a parse error
             cls = {514: "parent", 515: "static"}.get(raw1.raw, "self")
         else:
-            cls = r.callee_name(n, "op1") or "self /*class-unresolved*/"
+            cls = class_ref(r.callee_name(n, "op1") or "self /*class-unresolved*/")
         if cls.startswith("self") and ctx.meta.get("classDepth") is False:
             # no class scope (a free-function component): `self::` is a
             # compile error — an undefined-class name keeps the listing
@@ -159,6 +159,7 @@ def collect_new(ctx: LiftContext, i: int, end: int) -> int:
         # `new (` is a parse error; the bare stdClass placeholder keeps
         # the statement valid while flagging the unresolved ctor target
         cls = "\\stdClass /*class-unresolved*/"
+    cls = class_ref(cls)
     args = []
     j = i + 1
     consumed: set[int] = set()

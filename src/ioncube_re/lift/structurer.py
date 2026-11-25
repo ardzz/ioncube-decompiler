@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ..opcodes import OPNAMES
 from .model import LoopInfo, LiftContext, _PLUMBING, _PURE
-from .operand import bare, unwrap, zval_name
+from .operand import bare, class_ref, unwrap, zval_name
 
 # the region between a short-circuit jump and its target must hold only
 # these pure expression defs for the &&/|| merge to fire (emitIf's set,
@@ -48,6 +48,7 @@ def emit_try(ctx: LiftContext, i: int, tb: tuple[int, int]) -> int:
         cls = zval_name(ctx.zvals[ce.raw])
     if cls is None:
         cls = bare(ctx.render.ch(ctx.render.ex_op1(catchN)))
+    cls = class_ref(cls)
     e = catchN.ent.get("res")
     var = ctx.cv_name(e.raw) if e and e.kind == 8 else "$e"
     ctx.line(ctx.nodes[s])

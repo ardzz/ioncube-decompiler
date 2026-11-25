@@ -112,12 +112,13 @@ def offline_parse(wire: bytes, seeds, ierg: int | None, x: int, sig_gate: bool):
         return None
     if not r["nodes"]:
         return None
-    if sig_gate:
+    if sig_gate and r["mode"] == "sig":
         # eval: the sig check is the real validation; the RETURN-tail check
-        # only sharpens it there. Prod (nosig) components legally end in the
-        # exception epilogue (HANDLE_EXCEPTION 149 / JMP 44 / OP_DATA...) —
-        # a lastf restriction there false-negatives whole components
-        # (CannedResponse::getResponseWithTagsReplaced etc., 461-file sweep).
+        # only sharpens it there. Nosig components (v<=5 eval AND prod)
+        # legally end in the exception epilogue (HANDLE_EXCEPTION 149 /
+        # JMP 44 / OP_DATA...) — a lastf restriction there false-negatives
+        # whole components (CannedResponse::getResponseWithTagsReplaced etc.,
+        # 461-file sweep.
         lastf = r["nodes"][-1]["final"]
         if lastf not in (62, 199):
             return None

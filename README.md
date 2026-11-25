@@ -75,9 +75,49 @@ server-side.
 | `ioncube-re component CIPHER --key eval\|HEX` | layer-B component decrypt (17-byte eval key) |
 | `ioncube-re stream decode\|decode-raw\|components\|prod\|verify\|verify-raw` | frame codec + raw DEFLATE; production ICB0 multi-version chunks |
 | `ioncube-re wire [--ktab K] [--arena A] [--offline --seeds A,B --ierg 0x.. \| --stream --mainblob B] [--gt GT] FILE...` | wire-grammar walk, node assembly, offline keytable demask, gt cross-check |
-| `ioncube-re lift FILE [--chunk N] [--gt GT] [--no-auto] [--m5-dir D] [--valid-php]` | oplines → PHP source (typed signatures, interned names, switch/ternary structuring, opt-in goto-label fallback) |
+| `ioncube-re lift FILE [--chunk N] [--gt GT] [--no-auto] [--m5-dir D] [--valid-php] [--ierg 0xKEY]` | oplines → PHP source (typed signatures, interned names, switch/ternary structuring, opt-in goto-label fallback). `--ierg` overrides the stored keytable mask for license-bound/dynamic-key files, whose stored mask is a decoy. |
+| `ioncube-re license-key FILE... [--php PHP]` | extract the real keytable mask of a license-bound/dynamic-key file through the installed ionCube Loader (see below) |
 
 Exit codes: 0 ok, 1 usage/io, 2 verification/walk failure.
+
+### License-bound (dynamic-key) files
+
+A file encoded with a dynamic key stores a decoy keytable mask in its main
+blob. The real mask is derived by the ionCube Loader from the license's
+hidden `__mykey` property: the loader decodes the property to a decimal value
+`K` and computes `mask = K // 7 - 13` (verified against ionCube Loader
+13.0.2 / PHP 8.2).
+
+The property lives inside ionCube's encrypted license payload, so the loader
+is needed to recover it. `ioncube-re license-key` runs a minimal PHP harness
+that includes the file under the installed loader and reads the final mask
+from the loader's memory:
+
+```sh
+ioncube-re license-key path/to/encoded.php
+# 0x1234abcd
+ioncube-re lift path/to/encoded.php --ierg 0x1234abcd
+```
+
+`ioncube_re.license_key.extract_license_key()` exposes the same operation,
+and `decode_mykey()` / `mask_from_mykey()` document the property decoding.
+`tools/extract_license_key.py` is a thin wrapper around the CLI command.
+
+Requirements and limits:
+
+- an installed ionCube Loader and a valid license on the machine;
+- the loader executes the encoded file's top level (its symbols are declared;
+  this tool calls nothing) — only use files you trust;
+- the loader build is checked: this knows ionCube Loader 13.0.2 / PHP 8.2
+  (`ioncube_loader_lin_8.2.so`, key global at `base + 0x2608C0`); other
+  builds raise an error instead of returning a wrong value;
+- older formats the loader itself rejects (for example `[1/72]` PHP 7.2
+  builds) cannot be extracted this way;
+- without a license the hidden property is inside the encrypted payload and
+  is not statically available to this tool.
+
+This loader-build check is independent of the lifting pipeline's supported
+formats in the next section.
 
 ## Supported formats
 

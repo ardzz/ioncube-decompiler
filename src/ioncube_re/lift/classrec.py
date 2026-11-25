@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import re
 
+from .operand import class_ref
+
 
 def _scalar_value(pay: bytes):
     pay = pay.lstrip(b" ")
@@ -171,7 +173,7 @@ def class_tail(
 def prop_type(mask: int, classname: str | None) -> str:
     """A zend MAY_BE mask as a PHP type string ('' = untyped)."""
     if classname:
-        return classname
+        return class_ref(classname)
     NULL = 0x2
     FALSE = 0x4
     TRUE = 0x8
@@ -196,17 +198,40 @@ def prop_type(mask: int, classname: str | None) -> str:
         parts.append("bool")
     if not parts:
         return ""
-    t = "?".strip()
-    t = ("?" if nullable else "") + ("|".join(parts))
+    t = "|".join(parts)
+    if nullable:
+        # only a single type may use the `?T` shorthand — `?int|float` is a
+        # parse error, a nullable union is `int|float|null`
+        t = (t + "|null") if "|" in t else ("?" + t)
     return t
+
+
+def _nullable(t: str) -> str:
+    """`t` rendered so that it accepts null (used for null-defaulted props)."""
+    if not t or t in ("mixed", "null"):
+        return t
+    if "|" in t:
+        parts = [p[1:] if p.startswith("?") else p for p in t.split("|")]
+        if "null" not in parts:
+            parts.append("null")
+        return "|".join(parts)
+    return t if t.startswith("?") else "?" + t
 
 
 def prop_declare(p: dict) -> str:
     vis = {1: "public", 2: "protected", 4: "private"}.get(p["vis"] & 0x7, "public")
-    ro = " readonly" if p["vis"] & 0x20 else ""
     t = prop_type(p["mask"], p["class"])
-    t = (t + " ") if t else ""
     d = p["default"]
+    if d is None:
+        # a typed property with a null default must admit null:
+        # `private int $x = null;` is a compile error
+        t = _nullable(t)
+    # PHP readonly properties are typed and have no default (promoted ones
+    # aside). The wire can carry the 0x20 bit with an untyped or null-default
+    # property; emitting it there is a fatal, so drop the modifier rather
+    # than produce invalid source.
+    ro = " readonly" if (p["vis"] & 0x20 and t and d == "__nodefault__") else ""
+    t = (t + " ") if t else ""
     if d == "__nodefault__":
         dv = ""
     elif d is None:

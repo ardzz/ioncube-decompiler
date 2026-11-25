@@ -29,7 +29,7 @@ def test_catch_class_is_not_backslash_doubled():
     ctx.jt[0] = 2
     emit_try(ctx, 0, (0, 1))
     text = "".join(ctx.out)
-    assert "catch (Vendor\\Client $e)" in text
+    assert "catch (\\Vendor\\Client $e)" in text
     assert "Vendor\\\\Client" not in text
 
 

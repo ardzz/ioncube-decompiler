@@ -71,6 +71,34 @@ class PipelineError(Exception):
     pass
 
 
+def _declared_class(r: dict) -> tuple[str, str | None] | None:
+    """(class, parent) from an opcode-resolved wire's DECLARE_CLASS node.
+
+    The eval skeleton otherwise guesses the class from descriptor records,
+    which on some encoder generations name the *parent* (and can yield a
+    self-extension). DECLARE_CLASS op1/op2 carry the authoritative FQCNs;
+    they are string zvals on both operand slots.
+    """
+    for n in r.get("nodes", []):
+        op = n.get("trueop")
+        if op is None:
+            op = n.get("final")
+        if op not in (144, 145):  # DECLARE_CLASS, DECLARE_CLASS_DELAYED
+            continue
+
+        def name(which: str) -> str | None:
+            e = n.get("ent", {}).get(which)
+            if not e or e[0] != 1 or e[1] >= len(r.get("zvals", [])):
+                return None
+            s = r["zvals"][e[1]].get("str")
+            return s.decode("latin-1") if s else None
+
+        cls = name("op1")
+        if cls:
+            return cls, name("op2")
+    return None
+
+
 def lift_file(
     path: str,
     chunk: int = 1,
@@ -81,8 +109,13 @@ def lift_file(
     m5dir: str | None = None,
     valid_php: bool = False,
     debug: bool = False,
+    ierg: int | None = None,
 ) -> dict:
     """Lift one encoded file. Returns {'text': str, 'gt': [lines], 'stderr': [lines]}.
+
+    ierg overrides the keytable mask derived from the main blob. License-bound
+    (dynamic-key) files do not carry their real mask in the file; an operator
+    who knows it (from a known-good decode) can supply it here.
 
     Raises PipelineError on decode/parse failure (the PHP tool exits 2 there)."""
     stderr: list[str] = []
@@ -187,6 +220,10 @@ def lift_file(
         offlineX = u32(dr["plain"], 0x1C + sl)
         if offlineX > 64:
             offlineX = 2  # implausible X -> the eval default
+    if ierg is not None:
+        # explicit override (dynamic-key/license-bound files store a decoy
+        # mask in the main blob; the real one is license-derived)
+        offlineIerg = ierg
     mainSeeds = (u32(stream, 0x08), u32(stream, 0x0C))
 
     out: list[str] = ["<?php\n"]
@@ -223,6 +260,9 @@ def lift_file(
                 r = der[0]
                 meta["opSrc"] = der[1]
         meta.setdefault("opSrc", "wire-only")
+        # keep the opcode-resolved parse: the eval class skeleton reads the
+        # DECLARE_CLASS operands out of it (main component only)
+        meta["resolved"] = r
         ctx = LiftContext.build(wire, r, meta)
         ctx.valid_php = valid_php
         ctx.debug = debug
@@ -252,7 +292,16 @@ def lift_file(
                 # emitting it as an identifier is invalid PHP
                 out.append("    " * cd + f"function ({sig}){retPart} {{\n")
             else:
-                out.append("    " * cd + f"function {fn}({sig}){retPart} {{\n")
+                # method modifiers: visibility bits + ZEND_ACC_STATIC (0x10)
+                # from the wire's fn_flags; free functions take none
+                mods = ""
+                if cd:
+                    flags = r.get("fn", 0)
+                    vis = {1: "public", 2: "protected", 4: "private"}.get(
+                        flags & 0x7, "public"
+                    )
+                    mods = vis + (" static" if flags & 0x10 else "") + " "
+                out.append("    " * cd + f"{mods}function {fn}({sig}){retPart} {{\n")
             ctx.idp = cd + 1
         else:
             ctx.idp = 1 if meta.get("classDepth") else 0
@@ -476,8 +525,78 @@ def lift_file(
             if prom:
                 evalEnum["promoted"] = prom
 
-    # ---- sub-function components ----
+    # ---- eval main class skeleton ----
+    # The eval class guess below reads descriptor records and on this encoder
+    # generation often names the *parent* (or nothing) as the class, yielding
+    # methods outside any class or `class Modules extends Modules`. Prefer the
+    # main component's DECLARE_CLASS operands; fall back to the class record
+    # the encoder writes after the main wire (its leaf matches the filename).
+    evalMainOpen = False
+    evalMainDesc: str | None = None
     openClass = None
+    if not isProd and not (evalEnum and evalEnum["cases"]):
+        mainDecl = _declared_class(mainMeta.get("resolved") or mainR)
+        leaf = os.path.basename(path)
+        if leaf.endswith(".php"):
+            leaf = leaf[:-4]
+        if leaf.endswith(".class"):
+            leaf = leaf[:-6]
+        mainCls = class_name_hint(stream, boff + bsize, leaf)
+        if mainCls is None:
+            # fall back to the first tail class record when the filename
+            # identifies it: the `*.class.php` convention, or the record's
+            # leaf being a suffix of the stem (This is in some legacy code
+            # ported from Zend).
+            names = class_like_names(
+                stream, boff + bsize,
+                subMeta[0][3] if subMeta else len(stream),
+            )
+            if names:
+                cand = names[0]
+                cand_leaf = cand.rsplit("\\", 1)[-1]
+                if os.path.basename(path).endswith(".class.php") or (
+                    cand_leaf and leaf.lower().endswith(cand_leaf.lower())
+                ):
+                    mainCls = cand
+        mainParent = mainDecl[1] if mainDecl else None
+        if mainCls is None and mainDecl:
+            mainCls = mainDecl[0]
+        if mainCls is not None:
+            ns = None
+            clsLeaf = mainCls
+            if "\\" in clsLeaf:
+                ns, clsLeaf = clsLeaf.rsplit("\\", 1)
+            if mainParent is not None:
+                if mainParent.lower().lstrip("\\") == mainCls.lower().lstrip("\\"):
+                    mainParent = None
+                else:
+                    mainParent = "\\" + mainParent.lstrip("\\")
+            if ns:
+                out.append(f"\nnamespace {ns};\n")
+            out.append(
+                f"\nclass {clsLeaf}"
+                + (f" extends {mainParent}" if mainParent else "")
+                + " {\n"
+            )
+            if evalEnum and evalEnum.get("tail"):
+                from .classrec import prop_declare
+
+                for p in evalEnum["tail"]["props"]:
+                    if p["vis"] & 0x80:
+                        # promoted onto the ctor parameter list
+                        continue
+                    out.append(prop_declare(p) + "\n")
+                for nm, cv in evalEnum["tail"]["consts"]:
+                    lit = (
+                        f"'{cv}'"
+                        if isinstance(cv, str)
+                        else ("null" if cv is None else repr(cv))
+                    )
+                    out.append(f"    const {nm} = {lit};\n")
+            openClass = clsLeaf
+            evalMainOpen = True
+
+    # ---- sub-function components ----
     # per-sub class tables (property/const records the encoder wrote into
     # each sub's descriptor region) — indexed by sub order
     subTails: dict[int, dict] = {}
@@ -544,7 +663,23 @@ def lift_file(
         # SIBLING class record (gdiverse4: the enum Suit block precedes
         # Card) — no parent is recoverable from it
         if not isProd and not prodClassOpen:
-            if classRec is not None and classRec != openClass:
+            if evalMainOpen and classRec is not None:
+                # the first descriptor-named class group is the main class
+                # (on this encoder generation its record names the parent)
+                if evalMainDesc is None:
+                    evalMainDesc = classRec
+                if classRec == evalMainDesc:
+                    classRec = None
+            if classRec is not None and (
+                openClass is None or classRec.lower() != openClass.lower()
+            ):
+                # extending yourself is not allowed; the descriptor's
+                # class/parent pair can hold the same name here
+                if (
+                    parentRec is not None
+                    and parentRec.lower().lstrip("\\") == classRec.lower().lstrip("\\")
+                ):
+                    parentRec = None
                 if openClass is not None:
                     # the class table the encoder wrote into THIS sub's
                     # descriptor region belongs to the class being closed

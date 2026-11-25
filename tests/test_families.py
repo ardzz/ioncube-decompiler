@@ -111,7 +111,7 @@ def test_arith_coalesce_instanceof_fn1():
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "$x ?? null"
     emit_node(l, 1, l.thr)
-    assert l.tempExpr[8] == "$x instanceof Exception"
+    assert l.tempExpr[8] == "$x instanceof \\Exception"
     emit_node(l, 2, l.thr)
     assert l.tempExpr[9] == "strlen($x)"
 

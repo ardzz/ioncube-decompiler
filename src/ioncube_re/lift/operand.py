@@ -146,6 +146,27 @@ def bare(e: str) -> str:
     return e
 
 
+def class_ref(name: str) -> str:
+    """A wire class name as a namespace-safe PHP reference.
+
+    The wire stores resolved FQCNs, but the listing may wrap the class in a
+    recovered ``namespace`` — inside it a relative ``Foo\\Bar`` resolves
+    under that namespace instead of globally. A leading ``\\`` is identical
+    at global scope, so always fully qualify. Keywords (``self``/``parent``/
+    ``static``), expressions and synthetic placeholders are left alone.
+    """
+    if not name:
+        return name
+    n = name.strip()
+    if not n or n in ("self", "parent", "static"):
+        return name
+    if n.startswith("\\") or n.startswith("$") or n.startswith("("):
+        return name
+    if " " in n or "/*" in n:
+        return name  # synthetic placeholder (`self /*class-unresolved*/`)
+    return "\\" + name
+
+
 _IDENT_RE = re.compile(r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$")
 
 

@@ -8,6 +8,8 @@ import re
 
 from ..container import u32
 
+from .operand import class_ref
+
 
 # ---- zend type masks (Zend/zend_type_info.h; IS_STRING = 6 -> 1<<6 = 0x40) ----
 _MAY_BE = [
@@ -44,7 +46,9 @@ def render_type(ctrl: int, classnames: list[str] | None = None) -> str:
     bits = [nm for bit, nm in _MAY_BE if mask & bit]
     if mask & 0x100:
         if names:
-            bits = [nm for nm in bits if nm != "object"] + names
+            bits = [nm for nm in bits if nm != "object"] + [
+                class_ref(nm) for nm in names
+            ]
         # else keep the plain 'object'
     if not bits:
         return ""

@@ -546,7 +546,8 @@ def cmd_lift(a):
     if not a.files:
         _die(
             "usage: ioncube-re lift FILE [--chunk N] [--arena A] [--ktab K] "
-            "[--gt GTFILE] [--no-auto] [--m5-dir DIR] [--valid-php] [--no-lint]"
+            "[--gt GTFILE] [--no-auto] [--m5-dir DIR] [--valid-php] "
+            "[--ierg 0xKEY] [--no-lint]"
         )
     rc = 0
     for FILE in a.files:
@@ -561,6 +562,7 @@ def cmd_lift(a):
                 m5dir=a.m5_dir or _default_m5_dir(),
                 valid_php=a.valid_php,
                 debug=a.debug,
+                ierg=(int(a.ierg, 0) if a.ierg else None),
             )
         except (PipelineError, StreamError, ValueError, OSError) as e:
             print(f"lift: {e}", file=sys.stderr)
@@ -576,6 +578,26 @@ def cmd_lift(a):
             print(report)
             if not ok:
                 rc = LINT_FAIL
+    return rc
+
+
+def cmd_license_key(a):
+    from .license_key import LicenseKeyError, extract_license_key
+
+    rc = 0
+    for FILE in a.files:
+        try:
+            mask = extract_license_key(
+                FILE, php=a.php, bootstrap=a.bootstrap
+            )
+        except LicenseKeyError as e:
+            print(f"license-key: {FILE}: {e}", file=sys.stderr)
+            rc = 1
+            continue
+        if len(a.files) == 1:
+            print(f"0x{mask:08x}")
+        else:
+            print(f"{FILE}: 0x{mask:08x}")
     return rc
 
 
@@ -647,6 +669,12 @@ def build_parser() -> argparse.ArgumentParser:
     l.add_argument("--no-auto", action="store_true")
     l.add_argument("--m5-dir", default=None)
     l.add_argument(
+        "--ierg",
+        default=None,
+        help="override the main-blob keytable mask (0x...); needed for "
+        "license-bound/dynamic-key files whose stored mask is a decoy",
+    )
+    l.add_argument(
         "--valid-php",
         action="store_true",
         help="adopt the goto-label fallback for irreducible flow "
@@ -670,6 +698,19 @@ def build_parser() -> argparse.ArgumentParser:
         "lint failure.",
     )
     l.set_defaults(fn=cmd_lift)
+
+    lk = sub.add_parser(
+        "license-key",
+        help="extract the dynamic-key mask for a license-bound encoded file",
+    )
+    lk.add_argument("files", nargs="+")
+    lk.add_argument("--php", default="php", help="PHP CLI binary [php]")
+    lk.add_argument(
+        "--bootstrap",
+        default=None,
+        help="PHP file required before the target (base class/dependency)",
+    )
+    lk.set_defaults(fn=cmd_license_key)
     return p
 
 

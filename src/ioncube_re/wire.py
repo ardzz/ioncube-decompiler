@@ -27,7 +27,7 @@ from .container import i32, u16, u32
 from .crypto.keytable import kt_generate
 from .crypto.layerb import EVAL_KEY, component_decrypt
 from .interned import interned_name
-from .opcodes import HANDLER2OP, OPNAMES
+from .opcodes import HANDLER2OP, OPNAMES, wire_to_internal
 
 
 class WireError(Exception):
@@ -169,11 +169,25 @@ def parse_wire(
                     r.x06e3f()
         pre.append({"a": a, "b": b, "ctrl": zc, "zrec": zrec, "names": names})
     fi = r.i32()
+    fninfo: list[dict] = []
     if fi > 0:
-        print(
-            f"note: fn-info entries present ({fi}) — reader not modeled",
-            file=sys.stderr,
-        )
+        # PHP-8 attribute table.  Each entry is
+        # [u32][name ctrl + inline bytes][u32][line][u32]; the observed
+        # consumers are the #[\ReturnTypeWillChange] attributes on
+        # ArrayAccess overrides (ConfigBase offset*, SalesforceHttpCodes::
+        # offsetget).  fi < 0 (0x80000000) is the "no table" marker on
+        # ordinary wires; the fn-info block sits before the keytable count.
+        for _ in range(fi):
+            r.u32()
+            ctrl = r.u32()
+            nm = None
+            if ctrl & 0x20000000:
+                nm = r.raw(ctrl & 0xFF).decode("latin-1")
+            r.u32()
+            line = r.u32()
+            r.u32()
+            if nm:
+                fninfo.append({"name": nm, "line": line})
 
     def _grammar_fit(pos_opcnt: int):
         """Read an opcnt candidate at `pos_opcnt` and test both grammars
@@ -418,6 +432,7 @@ def parse_wire(
         "mode": mode,
         "pre": pre,
         "statics": statics,
+        "fninfo": fninfo,
         "end": r.p,
         "len": len(w),
     }
@@ -443,8 +458,9 @@ def _php_addcslashes(s: bytes) -> str:
 
 def fmt_node(n: dict, zvals: list[dict]) -> str:
     f0 = n["trueop"] if n["trueop"] is not None else n["final"]
-    if f0 is not None and f0 in OPNAMES:
-        opn = OPNAMES[f0]
+    fdisp = f0 if n["trueop"] is not None else wire_to_internal(f0)
+    if fdisp is not None and fdisp in OPNAMES:
+        opn = OPNAMES[fdisp]
     elif f0 is not None:
         opn = f"op{f0}"
     else:

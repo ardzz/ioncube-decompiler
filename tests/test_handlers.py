@@ -251,6 +251,161 @@ def test_handle_exception_assign_dim_alias():
     assert "$arr['k'] = 'v';" in "".join(l.out)
 
 
+def test_handle_exception_conditional_branch_alias():
+    """A 149 with a condition temp + target and no result is the garbled
+    JMPZ guarding an if body — it must become a real branch, not vanish."""
+    l = mk(
+        [
+            (18, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 6 * 16}, 0),
+            (149, {"op1": (2, 0), "op2": (0, 4)}, {"op1": 6 * 16}, 0),
+            (136, {"op1": (1, 1)}, {}, 0),
+            (62, {"op1": (1, 2)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"a"}, {"type": 6, "str": b"body"}, {"type": 1}],
+        cv={0: "x"},
+    )
+    assert l.op[1] == 43
+    from ioncube_re.lift import emit_region
+
+    emit_region(l, 0, l.thr)
+    t = "".join(l.out)
+    assert "if (" in t
+    assert "echo 'body';" in t
+
+
+def test_handle_exception_constant_concat_alias():
+    """Two constant operands concatenated into a temp (`include __DIR__ .
+    '/file.php'`) — a 149, since constant comparisons fold away."""
+    l = mk(
+        [
+            (149, {"op1": (1, 0), "op2": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"a"}, {"type": 6, "str": b"b"}],
+    )
+    assert l.op[0] == 53
+    emit_node(l, 0, l.thr)
+    assert l.tempExpr[7] == "'a' . 'b'"
+
+
+def test_fetch_static_prop():
+    """FETCH_STATIC_PROP_R: op1 = property, op2 = class — render
+    `\\Class::$prop`, not a global symbol-table entry."""
+    l = mk(
+        [
+            (173, {"op1": (1, 0), "op2": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),
+        ],
+        zvals=[
+            {"type": 6, "str": b"testExclusions"},
+            {"type": 6, "str": b"Foo\\Bar"},
+        ],
+    )
+    emit_node(l, 0, l.thr)
+    assert l.tempExpr[7] == "\\Foo\\Bar::$testExclusions"
+
+
+def test_handle_exception_op_data_alias():
+    """A 149 right after an ASSIGN_DIM/OBJ is the write's OP_DATA value,
+    not a statement (a value-return heuristic would misclassify it)."""
+    l = mk(
+        [
+            (23, {"op1": (8, 0), "op2": (1, 0)}, {}, 0),
+            (149, {"op1": (1, 1)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"k"}, {"type": 6, "str": b"v"}],
+        cv={0: "arr"},
+    )
+    assert l.op[1] == 137
+    emit_node(l, 0, l.thr)
+    assert "$arr['k'] = 'v';" in "".join(l.out)
+
+
+def test_handle_exception_end_silence_alias():
+    """A 149 carrying a BEGIN_SILENCE marker temp closes the `@` window."""
+    l = mk(
+        [
+            (57, {"res": (2, 0)}, {"res": 7 * 16}, 0),
+            (80, {"op1": (1, 0), "res": (2, 1)}, {"res": 8 * 16}, 0),
+            (149, {"op1": (2, 0)}, {"op1": 7 * 16}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"x"}],
+    )
+    assert l.op[2] == 58
+    for k in range(l.thr):
+        emit_node(l, k, l.thr)
+    assert l.tempExpr[8] == "@$GLOBALS['x']"
+
+
+def test_handle_exception_rope_end_alias():
+    """A 149 closing a ROPE_INIT/ADD run is ROPE_END (accumulator in op1,
+    final literal in op2)."""
+    l = mk(
+        [
+            (
+                54,
+                {"op2": (1, 0), "res": (2, 0)},
+                {"res": 7 * 16},
+                0,
+            ),
+            (55, {"op1": (2, 0), "op2": (8, 0)}, {"op1": 7 * 16}, 0),
+            (
+                149,
+                {"op1": (2, 0), "op2": (1, 1), "res": (2, 0)},
+                {"op1": 7 * 16, "res": 8 * 16},
+                0,
+            ),
+        ],
+        zvals=[{"type": 6, "str": b"a"}, {"type": 6, "str": b"b"}],
+        cv={0: "x"},
+    )
+    assert l.op[2] == 56
+    for k in range(l.thr):
+        emit_node(l, k, l.thr)
+    assert l.tempExpr[8] == "'a' . $x . 'b'"
+
+
+def test_handle_exception_free_of_switch_subject():
+    """A 149 carrying the switch subject temp is its FREE cleanup, never a
+    return of that internal value."""
+    l = mk(
+        [
+            (186, {"op1": (2, 0), "op2": (1, 0)}, {"op1": 7 * 16}, 0),
+            (149, {"op1": (2, 0)}, {"op1": 7 * 16}, 0),
+        ],
+        zvals=[{"type": 1}],
+    )
+    assert l.op[1] == 70
+
+
+@pytest.mark.parametrize(("fetch_op", "expected"), [(78, 77), (126, 125)])
+def test_handle_exception_fe_reset_alias(fetch_op, expected):
+    """A 149 whose op1 is an iterable temp and whose res is the iterator
+    slot the following FE_FETCH reads is a FE_RESET (ktab nosig aliasing);
+    the by-ref fetch selects the FE_RESET_RW spelling."""
+    l = mk(
+        [
+            (81, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 20 * 16}, 0),
+            (
+                149,
+                {"op1": (2, 0), "op2": (0, 4), "res": (4, 0)},
+                {"op1": 20 * 16, "res": 21 * 16},
+                0,
+            ),
+            (
+                fetch_op,
+                {"op1": (4, 0), "op2": (8, 1), "res": (2, 0)},
+                {"op1": 21 * 16, "res": 22 * 16},
+                0,
+            ),
+            (127, {"op1": (4, 0)}, {"op1": 21 * 16}, 0),
+            (62, {"op1": (1, 1)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"k"}, {"type": 1}],
+        cv={0: "items", 1: "v"},
+    )
+    assert l.op[1] == expected
+    assert l.feExit[1] == 4
+
+
 def test_handle_exception_with_res_stays_149():
     """A 149 carrying a result temp is a value op (the IS_EQUAL family
     with a CV left operand has this exact shape) — it must NOT be

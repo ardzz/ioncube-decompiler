@@ -9,7 +9,7 @@ import re
 
 from ...opcodes import OPNAMES
 from ..model import LiftContext
-from ..operand import bare
+from ..operand import bare, php_quote, zval_name
 from ..registry import opcode_handler
 
 
@@ -39,7 +39,10 @@ def _throw(ctx: LiftContext, i: int, end: int) -> int:
 def _exit(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     ctx.line(n)
-    v = ctx.render.ex_op1(n)
+    e = n.ent.get("op1")
+    # a type-0 operand with a pointer-sized value is encoder junk, not an
+    # exit status (`exit;`, not `exit(3565308672)`)
+    v = ctx.render.ex_op1(n) if e is not None and e.kind != 0 else None
     ctx.w("exit" + (f"({v})" if v is not None and v != "null" else "") + ";")
     ctx.emitted += 1
     return i + 1
@@ -60,6 +63,13 @@ def _include(ctx: LiftContext, i: int, end: int) -> int:
     }
     expr = ctx.render.ch(ctx.render.ex_op1(n))
     kw = k.get(n.ext, "include")
+    e = n.ent.get("res")
+    if e is not None and (e.kind & 6):
+        # the include/eval return value is consumed (`$bRes = eval(...)`,
+        # `if (!include_once ...)`) — render it as the expression its reader
+        # inlines.  eval keeps its call parentheses inside the grouping.
+        inner = f"{kw}({expr})" if kw == "eval" else f"{kw} {expr}"
+        return ctx.def_temp(n, "(" + inner + ")", i)
     # `eval` requires parentheses; the include family is valid without
     ctx.w(f"{kw}({expr});" if kw == "eval" else f"{kw} {expr};")
     ctx.emitted += 1
@@ -68,11 +78,38 @@ def _include(ctx: LiftContext, i: int, end: int) -> int:
 
 @opcode_handler(141, 144, 145, 146)  # DECLARE_FUNCTION/CLASS/...
 def _declare(ctx: LiftContext, i: int, end: int) -> int:
+    op = ctx.op[i]
+    if op == 141:
+        # the body is emitted as a separate component; keep the
+        # conditional block non-empty and point at it.  The name lets the
+        # pipeline place the body here (a declaration inside an `if` must
+        # stay inside it).
+        from ..operand import zval_name
+
+        n = ctx.nodes[i]
+        e = n.ent.get("op1")
+        nm = None
+        if e is not None and e.kind == 1 and e.raw < len(ctx.zvals):
+            nm = zval_name(ctx.zvals[e.raw])
+        ctx.line(n)
+        if nm:
+            ctx.w(f"/* function body emitted below: {nm} */")
+        else:
+            ctx.w("/* function body emitted below */")
+        ctx.emitted += 1
+        return i + 1
+    if op in (144, 145):
+        # the class skeleton is pre-opened from these operands by the
+        # pipeline; the node itself is declaration metadata
+        ctx.bk(i)
+        return i + 1
+    # 146 (anonymous class): keep the operands visible rather than
+    # dropping code.
     n = ctx.nodes[i]
     r = ctx.render
     ctx.line(n)
     ctx.w(
-        f"/* {OPNAMES.get(ctx.op[i], 'DECLARE')} op1={r.opnd_text(n, 'op1')} "
+        f"/* {OPNAMES.get(op, 'DECLARE')} op1={r.opnd_text(n, 'op1')} "
         f"op2={r.opnd_text(n, 'op2')} */"
     )
     ctx.emitted += 1
@@ -109,6 +146,27 @@ def _end_silence(ctx: LiftContext, i: int, end: int) -> int:
 
 
 # ---- statics, lexicals, closures ----
+
+
+@opcode_handler(143)  # DECLARE_CONST
+def _declare_const(ctx: LiftContext, i: int, end: int) -> int:
+    n = ctx.nodes[i]
+    r = ctx.render
+    name = None
+    e = n.ent.get("op1")
+    if e is not None and e.kind == 1 and e.raw < len(ctx.zvals):
+        name = zval_name(ctx.zvals[e.raw])
+    if name is None:
+        name = bare(r.ch(r.ex_op1(n)))
+    val = r.ch(r.ex_op2(n))
+    ctx.line(n)
+    if re.fullmatch(r"[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*", name):
+        ctx.w(f"const {name} = {val};")
+    else:
+        # a namespace-qualified name is not valid after `const`
+        ctx.w(f"define({php_quote(name.encode('latin-1'))}, {val});")
+    ctx.emitted += 1
+    return i + 1
 
 
 @opcode_handler(181)  # BIND_STATIC
@@ -170,19 +228,28 @@ def _declare_lambda(ctx: LiftContext, i: int, end: int) -> int:
             uses.append(("&" if nj.ext & 1 else "") + ctx.cv_name(ne2.raw))
         j += 1
     clause = (" use (" + ", ".join(uses) + ")") if uses else ""
-    # the closure body renders from its nested sub-wire (pipeline
-    # pre-pass, source order); without one the placeholder comment stands
+    # the closure body renders from its nested sub-wire: a pre-rendered
+    # main-tail body or the lazy outer sub-wire queue (source order, so
+    # nested closures consume their own components recursively)
     expr = f"function (){clause} {{ /* closure body: the {{closure}} component */ }}"
+    item = None
     bodies = ctx.meta.get("closureBodies")
     if bodies:
-        sig, ret, stmts = bodies.pop(0)
+        item = bodies.pop(0)
+    if item is None:
+        getter = ctx.meta.get("closure_at")
+        if getter is not None:
+            item = getter()
+    if item is not None:
+        sig, ret, stmts, by_ref = item
         # strip the listing's line markers + the accounting comment: the
         # arrow-fn detection needs the bare statement text
         core = re.sub(r"(?m)^\s*// line \d+\s*$\n?", "", stmts)
         core = re.sub(r"/\* \d+ nodes[^*]*\*/\s*$", "", core).strip()
-        head = f"function ({sig}){clause}" + (f": {ret}" if ret else "")
+        refMark = "&" if by_ref else ""
+        head = f"function {refMark}({sig}){clause}" + (f": {ret}" if ret else "")
         m = re.fullmatch(r"return (.+);", core, re.S)
-        if m is not None and ret and "->" not in sig:
+        if m is not None and ret and "->" not in sig and not by_ref:
             # a single-return body with a declared type is an arrow fn
             expr = f"fn ({sig}){clause}: {ret} => {m.group(1).strip()}"
         else:
@@ -217,15 +284,27 @@ def _make_ref(ctx: LiftContext, i: int, end: int) -> int:
 
 @opcode_handler(156)  # SEPARATE (refcount copy-on-write; identity)
 def _separate(ctx: LiftContext, i: int, end: int) -> int:
-    return ctx.def_temp(ctx.nodes[i], ctx.render.ch(ctx.render.ex_op1(ctx.nodes[i])), i)
+    n = ctx.nodes[i]
+    e1, er = n.ent.get("op1"), n.ent.get("res")
+    if (
+        e1 is not None
+        and er is not None
+        and (e1.kind & 6)
+        and (er.kind & 6)
+        and n.op1 // 16 == n.res // 16
+    ):
+        # in-place copy: the producer's temp already holds the expression
+        ctx.bk(i)
+        return i + 1
+    return ctx.def_temp(n, ctx.render.ch(ctx.render.ex_op1(n)), i)
 
 
 # ---- the bookkeeping set (consumed into structures; counted, not rendered) ----
 
 
-@opcode_handler(0, 63, 64, 70, 101, 102, 103, 104, 105, 107, 109, 124, 127, 137, 164)
+@opcode_handler(0, 63, 64, 70, 101, 102, 103, 104, 105, 107, 124, 127, 137, 164)
 def _bookkeeping(ctx: LiftContext, i: int, end: int) -> int:
-    # NOP/EXT_*, FREE/FE_FREE, FETCH_CLASS, RECV*, OP_DATA,
+    # NOP/EXT_*, FREE/FE_FREE, RECV*, OP_DATA,
     # VERIFY_RETURN_TYPE, CATCH bind — bookkeeping
     ctx.bookkept += 1
     return i + 1
@@ -265,16 +344,17 @@ def _return_by_ref(ctx: LiftContext, i: int, end: int) -> int:
     return emit_return(ctx, i, end)
 
 
-@opcode_handler(193)  # MATCH
-def _match_gettype(ctx: LiftContext, i: int, end: int) -> int:
-    # no sample lowers a real `match` — the wire's 193 sites are the
-    # encoder's gettype lowering (the res feeds a `== 'NULL'` check or a
-    # `'type ' . $x` message): render the gettype expression
-    return ctx.def_temp(
-        ctx.nodes[i],
-        "gettype(" + ctx.render.ch(ctx.render.ex_op1(ctx.nodes[i])) + ")",
-        i,
-    )
+@opcode_handler(193)  # MATCH (direct arm-table form)
+def _match_table(ctx: LiftContext, i: int, end: int) -> int:
+    from ..switches import emit_match_table
+
+    m = emit_match_table(ctx, i, end)
+    if m is not None:
+        return m
+    # the arm table did not fit the switch reconstruction; keep the node
+    # bookkept rather than misrendering it
+    ctx.bk(i)
+    return i + 1
 
 
 @opcode_handler(195, 197)  # MATCH_ERROR / CHECK_UNDEF_ARGS

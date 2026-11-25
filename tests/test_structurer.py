@@ -321,7 +321,7 @@ def test_ternary_jmpnz_inverts_condition():
         cv={0: "c", 1: "x"},
     )
     emit_region(l, 0, l.thr)
-    assert "$x = (!($c) ? 'yes' : 'no');" in out(l)
+    assert "$x = (!$c ? 'yes' : 'no');" in out(l)
 
 
 def test_ternary_multi_node_fetch_arms():
@@ -482,6 +482,40 @@ def test_switch_header_is_equal_chain():
     assert "IS_EQUAL" not in t and "opcode 18)" not in t
 
 
+def test_switch_header_single_case():
+    """A one-case switch still carries the SWITCH_STRING header and its
+    dispatch chain; the case (and default) bodies must stay inside it."""
+    l = mk(
+        [
+            (186, {"op1": (8, 0), "op2": (1, 5), "res": UNUSED}, {}, 0),
+            (18, {"op1": (8, 0), "op2": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (44, {"op1": (2, 0), "op2": (0, 6)}, {"op1": 7 * 16}, 0),  # -> 5
+            (42, {"op1": (0, 8)}, {}, 0),  # default JMP -> 7
+            (62, {"op1": (1, 2)}, {}, 0),  # dispatch-gap filler
+            (22, {"op1": (8, 1), "op2": (1, 3)}, {}, 0),  # case body
+            (42, {"op1": (0, 9)}, {}, 0),  # break -> 8
+            (22, {"op1": (8, 1), "op2": (1, 4)}, {}, 0),  # default body
+            (136, {"op1": (1, 0)}, {}, 0),  # post-switch statement
+        ],
+        zvals=[
+            {"type": 6, "str": b"end"},
+            {"type": 6, "str": b"a"},
+            {"type": 1},
+            {"type": 6, "str": b"case"},
+            {"type": 6, "str": b"default"},
+            {"type": 7, "str": b"not-a-table"},
+        ],
+        cv={0: "x", 1: "out"},
+    )
+    emit_region(l, 0, l.thr)
+    t = out(l)
+    assert "switch ($x) {" in t
+    assert "case 'a':" in t
+    assert "$out = 'case';" in t
+    assert "default:" in t
+    assert "$out = 'default';" in t
+
+
 def test_switch_header_degrades_without_chain():
     # header alone (no chain, no usable table): the old bookkeeping behavior
     l = mk(
@@ -495,6 +529,129 @@ def test_switch_header_degrades_without_chain():
     emit_node(l, 0, l.thr)
     assert "switch" not in out(l)
     assert l.bookkept == 1
+
+
+def _cmp_chain_nodes(branch_op=44):
+    """An IS_EQUAL dispatch chain without a jump-table header: the switch
+    form uses JMPNZ (into the case body); an if/else-if chain jumps away
+    on false (JMPZ)."""
+    return [
+        (18, {"op1": (8, 0), "op2": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),
+        (branch_op, {"op1": (2, 0), "op2": (0, 6)}, {"op1": 7 * 16}, 0),  # -> 5
+        (
+            18,
+            {"op1": (8, 0), "op2": (1, 2), "res": (2, 0)},
+            {"res": 7 * 16},
+            0,
+        ),
+        (branch_op, {"op1": (2, 0), "op2": (0, 9)}, {"op1": 7 * 16}, 0),  # -> 8
+        (42, {"op1": (0, 8)}, {}, 0),  # default JMP -> 7
+        (22, {"op1": (8, 1), "op2": (1, 3)}, {}, 0),  # case 'a' body
+        (42, {"op1": (0, 10)}, {}, 0),  # break -> 9
+        (22, {"op1": (8, 1), "op2": (1, 4)}, {}, 0),  # default body
+        (22, {"op1": (8, 1), "op2": (1, 5)}, {}, 0),  # case 'b' body
+        (136, {"op1": (1, 0)}, {}, 0),  # post-switch statement
+    ]
+
+
+def _chain_zvals():
+    return [
+        {"type": 6, "str": b"end"},
+        {"type": 6, "str": b"a"},
+        {"type": 6, "str": b"b"},
+        {"type": 6, "str": b"body-a"},
+        {"type": 6, "str": b"body-default"},
+        {"type": 6, "str": b"body-b"},
+    ]
+
+
+def test_comparison_chain_with_shared_subject_is_switch():
+    l = mk(
+        _cmp_chain_nodes(),
+        zvals=_chain_zvals(),
+        cv={0: "x", 1: "out"},
+    )
+    emit_region(l, 0, l.thr)
+    t = out(l)
+    assert "switch ($x) {" in t
+    assert "case 'a':" in t and "case 'b':" in t
+    assert "default:" in t
+
+
+def test_comparison_chain_with_jmpz_stays_if():
+    """A false-condition jump (JMPZ) is an if/else-if chain, not a switch
+    dispatch chain."""
+    l = mk(
+        _cmp_chain_nodes(branch_op=43),
+        zvals=_chain_zvals(),
+        cv={0: "x", 1: "out"},
+    )
+    emit_region(l, 0, l.thr)
+    t = out(l)
+    assert "switch (" not in t
+    assert "if (" in t
+
+
+def test_single_case_jmpnz_switch():
+    """A one-case switch has just one comparison; the JMPNZ dispatch plus
+    the chain-terminal JMP still identify it."""
+    l = mk(
+        [
+            (18, {"op1": (8, 0), "op2": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (44, {"op1": (2, 0), "op2": (0, 6)}, {"op1": 7 * 16}, 0),  # -> 5
+            (42, {"op1": (0, 8)}, {}, 0),  # chain-terminal JMP -> 7
+            (62, {"op1": (1, 2)}, {}, 0),  # 3: unreachable filler
+            (62, {"op1": (1, 2)}, {}, 0),  # 4: unreachable filler
+            (22, {"op1": (8, 1), "op2": (1, 1)}, {}, 0),  # 5: case body
+            (42, {"op1": (0, 9)}, {}, 0),  # 6: break -> 8
+            (22, {"op1": (8, 1), "op2": (1, 3)}, {}, 0),  # 7: default body
+            (136, {"op1": (1, 0)}, {}, 0),  # 8: post-switch
+        ],
+        zvals=[
+            {"type": 6, "str": b"end"},
+            {"type": 6, "str": b"a"},
+            {"type": 1},
+            {"type": 6, "str": b"default"},
+        ],
+        cv={0: "x", 1: "out"},
+    )
+    emit_region(l, 0, l.thr)
+    t = out(l)
+    assert "switch ($x) {" in t
+    assert "case 'a':" in t
+    assert "default:" in t
+
+
+def test_single_case_switch_result_return():
+    """A dispatch chain whose arms assign one temp and whose merge RETURNs
+    it lowers each arm to its own `return <expr>;`."""
+    l = mk(
+        [
+            (16, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 6 * 16}, 0),
+            (44, {"op1": (2, 0), "op2": (0, 4)}, {"op1": 6 * 16}, 0),  # -> 3
+            (42, {"op1": (0, 6)}, {}, 0),  # default JMP -> 5
+            (31, {"op1": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (42, {"op1": (0, 8)}, {}, 0),  # -> 7
+            (31, {"op1": (1, 2), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (42, {"op1": (0, 8)}, {}, 0),  # -> 7
+            (62, {"op1": (2, 0)}, {"op1": 7 * 16}, 0),  # merge RETURN temp
+            (62, {"op1": (1, 3)}, {}, 0),  # epilogue
+        ],
+        zvals=[
+            {"type": 6, "str": b"download"},
+            {"type": 3},  # true
+            {"type": 2},  # false
+            {"type": 1},
+        ],
+        cv={0: "command"},
+    )
+    emit_region(l, 0, l.thr)
+    t = out(l)
+    assert "switch ($command) {" in t
+    assert "case 'download':" in t
+    assert "return true;" in t
+    assert "return false;" in t
+    assert "$T" not in t
 
 
 def test_switch_jumptable_fallback_without_chain():

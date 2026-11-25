@@ -19,8 +19,9 @@ analysis passes below are its __init__ verbatim, plus the loop_stack /
 goto-target state the structurer upgrades need). The three documented
 wire ABI facts each live in exactly ONE place:
 
-  * the +2 anti-tamper garble table — ``_ungarble`` below, extended by the
-    SWITCH_LONG/SWITCH_STRING pair;
+  * the wire→internal opcode translation — ``opcodes.WIRE_TO_INTERNAL``
+    for raw wire finals, plus the internal trueop normalizations in
+    ``_ungarble`` below;
   * the CV-slot +5 rule — operand.py ``OperandRenderer.ex`` (the x86_64
     ABI: slot numbering starts at execute_data's 5 slots, loader-verified);
   * the DO-node stopping point — collectors.py.
@@ -214,18 +215,33 @@ class LiftContext:
                 return False
         elif op == 137:
             # OP_DATA: the assign's value operand is read through the
-            # unregistered data node (ASSIGN_DIM..OP_DATA pair). Inline when
-            # the def range holds nothing but the pair partner.
-            if uses:
+            # data node (ASSIGN_DIM..OP_DATA pair).  Its own registered use
+            # is allowed; inline when the def range holds nothing but the
+            # pair partner.
+            if uses and uses != [use_node]:
                 return False
             d = self.tempDef[slot]
             if d >= use_node:
                 return False
             for i in range(d + 1, use_node):
-                if i != use_node - 1 and (
-                    self.op[i] not in _PLUMBING and self.op[i] not in _PURE
+                if i == use_node - 1:
+                    continue
+                opi = self.op[i]
+                if opi in _PLUMBING or opi in _PURE:
+                    continue
+                if opi == 22 and self.meta.get("exprAssign"):
+                    # an assignment expression inside a short-circuit
+                    # operand: its value is already in tempExpr
+                    continue
+                # a branch consumed by an expression folder (a folded
+                # ternary/if merge) carries its control flow into the
+                # expression at the use site and no longer blocks the inline;
+                # a JMP to the very next node is a no-op
+                if opi in (42, 43, 44, 46, 47) and (
+                    i in self.acct or (opi == 42 and self.jt.get(i) == i + 1)
                 ):
-                    return False
+                    continue
+                return False
             return True
         elif len(uses) != 1 or uses[0] != use_node:
             return False
@@ -237,8 +253,16 @@ class LiftContext:
             # node instead (pendingStmt)
             return False
         for i in range(d + 1, use_node):
-            if self.op[i] not in _PLUMBING and self.op[i] not in _PURE:
-                return False
+            opi = self.op[i]
+            if opi in _PLUMBING or opi in _PURE:
+                continue
+            if opi == 22 and self.meta.get("exprAssign"):
+                continue
+            if opi in (42, 43, 44, 46, 47) and (
+                i in self.acct or (opi == 42 and self.jt.get(i) == i + 1)
+            ):
+                continue
+            return False
         return True
 
     def temp_name(self, slot: int, kind: int) -> str:
@@ -257,6 +281,38 @@ class LiftContext:
             slot = n.res // 16
             uses = self.tempUses.get(slot, [])
             forward = bool(uses) and min(uses) < i
+            branch_chain = (
+                bool(uses)
+                and all(self.op.get(u) in (43, 44, 46, 47) for u in uses)
+                and any(self.op.get(u) in (46, 47) for u in uses)
+                and all(u > i for u in uses)
+            )
+            switch_chain = (
+                bool(uses)
+                and all(self.op.get(u) in (48, 185, 186, 194) for u in uses)
+                and any(self.op.get(u) in (185, 186) for u in uses)
+                and all(u > i for u in uses)
+            )
+            if branch_chain or switch_chain:
+                # a short-circuit condition temp or a switch subject: every
+                # reader is machinery the merge/switch emitter consumes into
+                # the emitted expression; a standalone `$Tn = ...;` would be
+                # dead.
+                self.tempExpr[slot] = expr
+                self.emitted += 1
+                return i + 1
+            if self.meta.get("switchResultSlot") == slot:
+                # the switch emitter recognised `$dest = $temp` after a
+                # switch whose arms define $temp; write each arm directly
+                # to $dest instead of keeping the shared temp.
+                name = self.meta.get("switchResultLhs") or self.temp_name(
+                    slot, e.kind
+                )
+                self.line(n)
+                self.w(name + " = " + unwrap(expr) + ";")
+                self.tempExpr[slot] = expr
+                self.emitted += 1
+                return i + 1
             if len(uses) > 1 or forward:
                 # a multi-read temp keeps a named definition statement: the
                 # references render the same $Tn/$Vn and every read sees the
@@ -267,6 +323,14 @@ class LiftContext:
                 # exactly that null — render order matches execution order
                 self.line(n)
                 self.w(self.temp_name(slot, e.kind) + " = " + unwrap(expr) + ";")
+            elif uses:
+                # a single later read that cannot inline (a non-pure write
+                # sits between the def and the use) still needs the value:
+                # keep the named temp so the reader's $Tn is defined
+                self.tempExpr[slot] = expr
+                if not self.inlinable(slot, uses[0]):
+                    self.line(n)
+                    self.w(self.temp_name(slot, e.kind) + " = " + unwrap(expr) + ";")
             self.tempExpr[slot] = expr
             self.emitted += 1
             return i + 1
@@ -293,6 +357,7 @@ _INIT_CALL = frozenset({59, 61, 69, 112, 113, 118, 128})
 # def and the ASSIGN read).
 _PLUMBING = frozenset(
     {
+        0,  # NOP: expression glue between a call and its QM/assign
         59,
         61,
         69,
@@ -328,6 +393,15 @@ _PLUMBING = frozenset(
         # between the DECLARE_LAMBDA def and its ASSIGN use
         180,
         182,
+        # HANDLE_EXCEPTION after a call in a try region: the encoded call
+        # result is carried through it (res = op1); no source statement
+        149,
+        # SEPARATE: an in-place copy-on-write identity — the producer's
+        # temp already carries the expression its reader inlines
+        156,
+        # FREE / FREE_OP: statement glue between a call def and its reader
+        70,
+        127,
     }
 )
 _PURE = frozenset(
@@ -337,6 +411,9 @@ _PURE = frozenset(
         51,
         52,
         53,
+        54,
+        55,
+        56,
         99,
         71,
         72,
@@ -344,14 +421,21 @@ _PURE = frozenset(
         114,
         115,
         121,
+        122,
         123,
         138,
         148,
         154,
+        157,
         169,
         170,
+        179,
+        187,
         188,
+        189,
+        190,
         191,
+        192,
     ]
     + list(range(80, 99))
     + list(range(173, 179))

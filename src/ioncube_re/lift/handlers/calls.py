@@ -4,7 +4,7 @@ the call glue that can land orphaned degrades to bookkeeping."""
 
 from __future__ import annotations
 
-from ..collectors import collect_array, collect_call, collect_new
+from ..collectors import _INIT, collect_array, collect_call, collect_new
 from ..model import LiftContext
 from ..registry import opcode_handler
 
@@ -57,6 +57,19 @@ def _check_func_arg(ctx: LiftContext, i: int, end: int) -> int:
     # inside collect_call; this is the walk-landed-anywhere fallback)
     ctx.bk(i)
     return i + 1
+
+
+@opcode_handler(200)  # CALLABLE_CONVERT
+def _callable_convert(ctx: LiftContext, i: int, end: int) -> int:
+    # normally consumed with its INIT by collect_call (first-class
+    # callable); landing here, rebuild from the preceding INIT when it is
+    # still identifiable, else leave a visible placeholder def
+    from ..collectors import _callable_expr
+
+    expr = None
+    if i > 0 and ctx.op.get(i - 1) in _INIT:
+        expr = _callable_expr(ctx, i - 1)
+    return ctx.def_temp(ctx.nodes[i], expr, i)
 
 
 @opcode_handler(199)  # VERIFY_NEVER_TYPE

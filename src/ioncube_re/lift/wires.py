@@ -98,31 +98,38 @@ def scan_wires(stream: bytes, start: int) -> list[tuple[int, int, dict]]:
     return found
 
 
-def record_seeds(
+def record_seed_candidates(
     stream: bytes, start: int, end: int, wire_size: int
-) -> tuple[int, int] | None:
-    """A sub-wire record's (seedA, seedB): the u32 wire-size word followed by 8
-    seed bytes.
+) -> list[tuple[int, int]]:
+    """All plausible sub-wire record (seedA, seedB) pairs, best first.
 
     A region can contain a coincidental u32 == wire_size (junk, inlined
     literals, earlier wire tails), so the first match is not necessarily the
-    record. The real record carries the eval-record marker 0x01 at +0x15
-    (byte-verified on healthy records);
-    prefer the closest match that has it, else fall back to the closest."""
-    best: tuple[int, int, int] | None = None  # (priority, -distance, i)
+    record.  The real record carries the eval-record marker 0x01 at +0x15
+    (byte-verified on healthy records); prefer matches with it, then the
+    closest.  More than one match can carry the marker — the caller should
+    validate the candidates with the keytable parse.
+    """
+    cands: list[tuple[int, int, int]] = []  # (priority, -distance, i)
     i = start
     while i + 12 <= end:
         if u32(stream, i) == wire_size:
             marker = stream[i + 0x15] if i + 0x15 < len(stream) else 0
             pri = 0 if marker == 1 else 1
-            cand = (pri, -(i - start), i)
-            if best is None or cand < best:
-                best = cand
+            cands.append((pri, -(i - start), i))
         i += 1
-    if best is None:
-        return None
-    i = best[2]
-    return (u32(stream, i + 4), u32(stream, i + 8))
+    cands.sort()
+    return [(u32(stream, i + 4), u32(stream, i + 8)) for _p, _d, i in cands]
+
+
+def record_seeds(
+    stream: bytes, start: int, end: int, wire_size: int
+) -> tuple[int, int] | None:
+    """A sub-wire record's (seedA, seedB): the u32 wire-size word followed by 8
+    seed bytes.  The best candidate; the caller can validate alternatives
+    from :func:`record_seed_candidates` with the keytable parse."""
+    cands = record_seed_candidates(stream, start, end, wire_size)
+    return cands[0] if cands else None
 
 
 # ---- stream/wire string extraction ----
@@ -191,6 +198,7 @@ __all__ = [
     "classrec_strings",
     "desc_strings",
     "pool_strings",
+    "record_seed_candidates",
     "record_seeds",
     "scan_wires",
     "tail_doccomment",

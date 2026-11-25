@@ -1,10 +1,14 @@
 """PHP 8.1 opcode numbers and the M5 handler-VA -> opcode map.
 
 The 201-name table was extracted from the php81-test container binary's
-zend_vm_opcodes name array (identical to the loader's handler-table order);
-the HANDLER2OP table maps demasked handler file-VAs (low 20 bits) to the
-opcode names proven by the 140/140 live dispatches.
-Entries >= ADD_ARRAY_UNPACK that no live sample exercised are best-effort.
+zend_vm_opcodes name array (identical to the loader's handler-table order).
+It omits FETCH_STATIC_PROP_FUNC_ARG (official 177) and
+ISSET_ISEMPTY_STATIC_PROP (official 180), so the internal entries from 177
+are two lower than the wire's official PHP 8.1/8.2 numbering;
+WIRE_TO_INTERNAL maps the wire numbers back to this table before the lift
+handlers see them.  The HANDLER2OP table maps demasked handler file-VAs (low
+20 bits) to the opcode names proven by the 140/140 live dispatches.  Entries
+>= ADD_ARRAY_UNPACK that no live sample exercised are best-effort.
 """
 
 OPNAMES: dict[int, str] = {
@@ -210,6 +214,61 @@ OPNAMES: dict[int, str] = {
     199: "VERIFY_NEVER_TYPE",
     200: "CALLABLE_CONVERT",
 }
+
+# The wire's opcode bytes are the official PHP 8.1/8.2 numbers.  OPNAMES
+# above is the loader's internal table; it lacks the two entries the loader
+# does not dispatch (FETCH_STATIC_PROP_FUNC_ARG, ISSET_ISEMPTY_STATIC_PROP)
+# and is therefore two lower from 177 on.  This is the official tail; the
+# lift boundary translates it back to the internal numbers used by the
+# handlers, the analysis gates and the arena/wD0 resolvers.
+WIRE_OPNAMES: dict[int, str] = {
+    177: "FETCH_STATIC_PROP_FUNC_ARG",
+    178: "FETCH_STATIC_PROP_UNSET",
+    179: "UNSET_STATIC_PROP",
+    180: "ISSET_ISEMPTY_STATIC_PROP",
+    181: "FETCH_CLASS_CONSTANT",
+    182: "BIND_LEXICAL",
+    183: "BIND_STATIC",
+    184: "FETCH_THIS",
+    185: "SEND_FUNC_ARG",
+    186: "ISSET_ISEMPTY_THIS",
+    187: "SWITCH_LONG",
+    188: "SWITCH_STRING",
+    189: "IN_ARRAY",
+    190: "COUNT",
+    191: "GET_CLASS",
+    192: "GET_CALLED_CLASS",
+    193: "GET_TYPE",
+    194: "ARRAY_KEY_EXISTS",
+    195: "MATCH",
+    196: "CASE_STRICT",
+    197: "MATCH_ERROR",
+    198: "JMP_NULL",
+    199: "CHECK_UNDEF_ARGS",
+    200: "FETCH_GLOBALS",
+    201: "VERIFY_NEVER_TYPE",
+    202: "CALLABLE_CONVERT",
+}
+
+_NAME2OP = {name: op for op, name in OPNAMES.items()}
+WIRE_TO_INTERNAL: dict[int, int] = {
+    wire: _NAME2OP[name]
+    for wire, name in WIRE_OPNAMES.items()
+    if name in _NAME2OP
+}
+# Names the internal table does not carry.  FETCH_STATIC_PROP_FUNC_ARG is
+# another static-property read (the 173..178 by-name family); route it to
+# FETCH_STATIC_PROP_R.  ISSET_ISEMPTY_STATIC_PROP has no dedicated handler,
+# so use the closest read slot rather than the wrong BIND_LEXICAL entry.
+WIRE_TO_INTERNAL[177] = 173
+WIRE_TO_INTERNAL[180] = 176
+
+
+def wire_to_internal(op: int | None) -> int | None:
+    """Official wire opcode -> the loader-internal number used by lift."""
+    if op is None:
+        return None
+    return WIRE_TO_INTERNAL.get(op, op)
 
 # handler file-VA -> PHP opcode name (live dispatch evidence, M5 140/140;
 # used by the arena validation mode to name the TRUE opcode of wD0 nodes

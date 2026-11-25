@@ -82,9 +82,9 @@ def test_arith_unary_and_cast():
         cv={0: "x"},
     )
     emit_node(l, 0, l.thr)
-    assert l.tempExpr[7] == "!($x)"
+    assert l.tempExpr[7] == "!$x"
     emit_node(l, 1, l.thr)
-    assert l.tempExpr[8] == "(is_long)($x)"  # ext 3 = is_long (cast_name map)
+    assert l.tempExpr[8] == "(is_long)$x"  # ext 3 = is_long (cast_name map)
 
 
 def test_arith_type_check():
@@ -111,9 +111,44 @@ def test_arith_coalesce_instanceof_fn1():
     emit_node(l, 0, l.thr)
     assert l.tempExpr[7] == "$x ?? null"
     emit_node(l, 1, l.thr)
-    assert l.tempExpr[8] == "$x instanceof Exception"
+    assert l.tempExpr[8] == "$x instanceof \\Exception"
     emit_node(l, 2, l.thr)
     assert l.tempExpr[9] == "strlen($x)"
+
+
+def test_arith_coalesce_dim_assign():
+    """`$arr[$k] ??= 'v'`: the fallback block carries the conditional
+    ASSIGN_DIM + OP_DATA; the coalesce must fold it into a self-coalescing
+    write rather than skipping the block (empty loop body)."""
+    l = mk(
+        [
+            (90, {"op1": (8, 0), "op2": (8, 1), "res": (2, 0)}, {"res": 20 * 16}, 0),
+            (
+                169,
+                {"op1": (2, 0), "op2": (0, 5), "res": (2, 0)},
+                {"op1": 20 * 16, "res": 22 * 16},
+                0,
+            ),
+            (
+                23,
+                {"op1": (8, 0), "op2": (8, 1), "res": (2, 0)},
+                {"res": 21 * 16},
+                0,
+            ),
+            (137, {"op1": (1, 0)}, {}, 0),
+            (31, {"op1": (2, 0), "res": (2, 0)}, {"op1": 21 * 16, "res": 22 * 16}, 0),
+            (70, {"op1": (2, 0)}, {"op1": 22 * 16}, 0),
+            (62, {"op1": (1, 1)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"v"}, {"type": 1}],
+        cv={0: "arr", 1: "k"},
+    )
+    from ioncube_re.lift import emit_region
+
+    emit_region(l, 0, l.thr)
+    t = out(l)
+    assert "$arr[$k] = $arr[$k] ?? 'v';" in t
+    assert l.unknown == 0
 
 
 def test_arith_qm_assign_passthrough():
@@ -193,6 +228,23 @@ def test_fetch_r_superglobal_vs_globals():
     assert (
         l.tempExpr[8] == "$GLOBALS['registry']"
     )  # symbol-table key: quoted (ic_lift parity)
+
+
+def test_fetch_w_computed_name():
+    """`${$name} = 'v'`: FETCH_W's op1 is the name expression (a CV/temp),
+    not a zval — render the variable-variable form."""
+    l = mk(
+        [
+            (83, {"op1": (8, 0), "res": (4, 0)}, {"res": 20 * 16}, 0),
+            (22, {"op1": (4, 0), "op2": (1, 0)}, {"op1": 20 * 16}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"v"}],
+        cv={0: "name"},
+    )
+    emit_node(l, 0, l.thr)
+    assert l.tempExpr[20] == "${$name}"
+    emit_node(l, 1, l.thr)
+    assert "${$name} = 'v';" in out(l)
 
 
 def test_fetch_constant_bare_reference():
@@ -329,7 +381,9 @@ def test_echo_throw_exit_include():
 
 
 def test_bookkeeping_set_counts_once():
-    ops = [0, 63, 64, 70, 101, 102, 103, 104, 105, 107, 109, 124, 127, 137, 164]
+    # 109 (FETCH_CLASS) has its own handler now: it defines the dynamic
+    # class temp for `$class::$prop`
+    ops = [0, 63, 64, 70, 101, 102, 103, 104, 105, 107, 124, 127, 137, 164]
     l = mk([(op, {}, {}, 0) for op in ops])
     for k in range(l.thr):
         emit_node(l, k, l.thr)
@@ -338,13 +392,28 @@ def test_bookkeeping_set_counts_once():
     assert out(l) == ""
 
 
-def test_declare_comment_form():
+def test_declare_class_is_bookkeeping():
+    # the class skeleton is pre-opened from these operands by the pipeline;
+    # the node itself carries no rendered statement
     l = mk(
         [(144, {"op1": (1, 0), "op2": (1, 1)}, {}, 0)],
         zvals=[{"type": 6, "str": b"m"}, {"type": 6, "str": b"p"}],
     )
     emit_node(l, 0, l.thr)
-    assert "/* DECLARE_CLASS op1=string('m') op2=string('p') */" in out(l)
+    assert out(l) == ""
+    assert l.bookkept == 1
+
+
+def test_declare_const_renders_a_const_statement():
+    l = mk(
+        [(143, {"op1": (1, 0), "op2": (1, 1)}, {}, 0)],
+        zvals=[
+            {"type": 6, "str": b"BASE_CONF_DIR"},
+            {"type": 6, "str": b"/etc/apache2/"},
+        ],
+    )
+    emit_node(l, 0, l.thr)
+    assert "const BASE_CONF_DIR = '/etc/apache2/';" in out(l)
 
 
 # ---- registry shape over the family modules ----
@@ -373,5 +442,6 @@ def test_every_family_module_is_registered():
     for op in (136, 141, 57, 58, 142, 181):  # misc
         assert op in HANDLERS
     # the unknown fallback stays: no handlers for these
-    for op in (196, 198, 200, 202):
+    # (198 FETCH_GLOBALS and 200 CALLABLE_CONVERT are now supported)
+    for op in (196, 202):
         assert op not in HANDLERS

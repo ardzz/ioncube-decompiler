@@ -34,6 +34,10 @@ def b64_decode(text: str) -> bytes:
         if bits >= 8:
             bits -= 8
             out.append((acc >> bits) & 0xFF)
+            # keep only the unconsumed bits: without this the accumulator
+            # grows by 6 bits per character and the shifts become O(n) —
+            # quadratic overall (a 290KB eval file took 23s)
+            acc &= (1 << bits) - 1
     return bytes(out)
 
 

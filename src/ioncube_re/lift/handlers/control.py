@@ -61,6 +61,15 @@ def _switch_header(ctx: LiftContext, i: int, end: int) -> int:
 
 @opcode_handler(149)  # HANDLE_EXCEPTION
 def _handle_exception(ctx: LiftContext, i: int, end: int) -> int:
-    # the exception-handler landing pad; the tc records drive try/catch
+    # the exception-handler landing pad.  In a call-expression region the
+    # encoder also carries the call result through it (res = op1), e.g.
+    # the last term of a short-circuit condition: define the result temp
+    # so the JMPZ reader sees the call expression instead of an undefined
+    # $T.
+    n = ctx.nodes[i]
+    e = n.ent.get("res")
+    o = n.ent.get("op1")
+    if e is not None and (e.kind & 6) and o is not None:
+        return ctx.def_temp(n, ctx.render.ex_op1(n), i)
     ctx.bk(i)
     return i + 1

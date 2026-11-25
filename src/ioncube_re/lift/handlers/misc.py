@@ -9,7 +9,7 @@ import re
 
 from ...opcodes import OPNAMES
 from ..model import LiftContext
-from ..operand import bare
+from ..operand import bare, php_quote, zval_name
 from ..registry import opcode_handler
 
 
@@ -68,11 +68,27 @@ def _include(ctx: LiftContext, i: int, end: int) -> int:
 
 @opcode_handler(141, 144, 145, 146)  # DECLARE_FUNCTION/CLASS/...
 def _declare(ctx: LiftContext, i: int, end: int) -> int:
+    op = ctx.op[i]
+    if op == 141:
+        # the body is emitted as a separate component; keep the
+        # conditional block non-empty and point at it
+        n = ctx.nodes[i]
+        ctx.line(n)
+        ctx.w("/* function body emitted below */")
+        ctx.emitted += 1
+        return i + 1
+    if op in (144, 145):
+        # the class skeleton is pre-opened from these operands by the
+        # pipeline; the node itself is declaration metadata
+        ctx.bk(i)
+        return i + 1
+    # 146 (anonymous class): keep the operands visible rather than
+    # dropping code.
     n = ctx.nodes[i]
     r = ctx.render
     ctx.line(n)
     ctx.w(
-        f"/* {OPNAMES.get(ctx.op[i], 'DECLARE')} op1={r.opnd_text(n, 'op1')} "
+        f"/* {OPNAMES.get(op, 'DECLARE')} op1={r.opnd_text(n, 'op1')} "
         f"op2={r.opnd_text(n, 'op2')} */"
     )
     ctx.emitted += 1
@@ -109,6 +125,27 @@ def _end_silence(ctx: LiftContext, i: int, end: int) -> int:
 
 
 # ---- statics, lexicals, closures ----
+
+
+@opcode_handler(143)  # DECLARE_CONST
+def _declare_const(ctx: LiftContext, i: int, end: int) -> int:
+    n = ctx.nodes[i]
+    r = ctx.render
+    name = None
+    e = n.ent.get("op1")
+    if e is not None and e.kind == 1 and e.raw < len(ctx.zvals):
+        name = zval_name(ctx.zvals[e.raw])
+    if name is None:
+        name = bare(r.ch(r.ex_op1(n)))
+    val = r.ch(r.ex_op2(n))
+    ctx.line(n)
+    if re.fullmatch(r"[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*", name):
+        ctx.w(f"const {name} = {val};")
+    else:
+        # a namespace-qualified name is not valid after `const`
+        ctx.w(f"define({php_quote(name.encode('latin-1'))}, {val});")
+    ctx.emitted += 1
+    return i + 1
 
 
 @opcode_handler(181)  # BIND_STATIC
@@ -265,16 +302,17 @@ def _return_by_ref(ctx: LiftContext, i: int, end: int) -> int:
     return emit_return(ctx, i, end)
 
 
-@opcode_handler(193)  # MATCH
-def _match_gettype(ctx: LiftContext, i: int, end: int) -> int:
-    # no sample lowers a real `match` — the wire's 193 sites are the
-    # encoder's gettype lowering (the res feeds a `== 'NULL'` check or a
-    # `'type ' . $x` message): render the gettype expression
-    return ctx.def_temp(
-        ctx.nodes[i],
-        "gettype(" + ctx.render.ch(ctx.render.ex_op1(ctx.nodes[i])) + ")",
-        i,
-    )
+@opcode_handler(193)  # MATCH (direct arm-table form)
+def _match_table(ctx: LiftContext, i: int, end: int) -> int:
+    from ..switches import emit_match_table
+
+    m = emit_match_table(ctx, i, end)
+    if m is not None:
+        return m
+    # the arm table did not fit the switch reconstruction; keep the node
+    # bookkept rather than misrendering it
+    ctx.bk(i)
+    return i + 1
 
 
 @opcode_handler(195, 197)  # MATCH_ERROR / CHECK_UNDEF_ARGS

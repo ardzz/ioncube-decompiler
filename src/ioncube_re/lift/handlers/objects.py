@@ -4,7 +4,7 @@ unset chains, PRE_INC/DEC_OBJ, ISSET_ISEMPTY_PROP_OBJ, FETCH_THIS."""
 from __future__ import annotations
 
 from ..model import LiftContext
-from ..operand import prop_txt
+from ..operand import class_ref, prop_txt, zval_name
 from ..registry import opcode_handler
 
 
@@ -29,6 +29,18 @@ def _fetch_dim(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     r = ctx.render
     return ctx.def_temp(n, r.obj(r.ch(r.ex_op1(n))) + "[" + r.ch(r.ex_op2(n)) + "]", i)
+
+
+@opcode_handler(157)  # FETCH_CLASS_NAME
+def _fetch_class_name(ctx: LiftContext, i: int, end: int) -> int:
+    n = ctx.nodes[i]
+    r = ctx.render
+    e = n.ent.get("op1")
+    if e is not None and e.kind == 1 and e.raw < len(ctx.zvals):
+        nm = zval_name(ctx.zvals[e.raw])
+        if nm is not None:
+            return ctx.def_temp(n, class_ref(nm) + "::class", i)
+    return ctx.def_temp(n, "get_class(" + r.ch(r.ex_op1(n)) + ")", i)
 
 
 @opcode_handler(182)  # FETCH_THIS (incl. the ungarbled ISSET_ISEMPTY_THIS)

@@ -127,6 +127,25 @@ def _coalesce(ctx: LiftContext, i: int, end: int) -> int:
 @opcode_handler(31)  # QM_ASSIGN
 def _qm_assign(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
+    e = n.ent.get("res")
+    result_slot = ctx.meta.get("matchResultSlot")
+    if e is not None and (e.kind & 6) and result_slot is not None:
+        slot = n.res // 16
+        if slot == result_slot:
+            # the arm value of a reconstructed match: it must be written at
+            # runtime inside this case, not inlined into the merge
+            from ..operand import unwrap
+
+            ctx.line(n)
+            ctx.w(
+                ctx.temp_name(slot, e.kind)
+                + " = "
+                + unwrap(ctx.render.ch(ctx.render.ex_op1(n)))
+                + ";"
+            )
+            ctx.tempExpr.pop(slot, None)
+            ctx.emitted += 1
+            return i + 1
     return ctx.def_temp(n, ctx.render.ch(ctx.render.ex_op1(n)), i)
 
 

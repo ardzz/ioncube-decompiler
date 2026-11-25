@@ -137,7 +137,7 @@ the decompiler's own markers, not recovered source comments.
 | PHP targets | 8.1 (eval-encoded files), 8.1/8.2/8.3/8.4 (production chunks) |
 | Containers | "basic" eval container + production ICB0 multi-version |
 | Wire grammar | sig mode (v>5) and nosig mode (v≤5), auto-detected |
-| Opcode table | PHP 8.1 names (201) |
+| Opcode table | PHP 8.1/8.2 wire numbers (0–202), mapped to the loader's 201-entry handler table |
 | Offline keytable | MWC6^ierg formula, validated per file; files whose keytable fails the gate lift wire-only |
 
 ## Limitations
@@ -155,6 +155,11 @@ the decompiler's own markers, not recovered source comments.
 - On eval-generation files, a 64-bit long zval whose high word falls outside
   i32 renders from the low word only; true >2^31 integers are the casualty.
   Production files are unaffected.
+- Wire opcodes 177–202 use the official PHP 8.1/8.2 numbers and are mapped
+  to the loader's internal table before lifting. Direct `MATCH` arm tables
+  are reconstructed as equivalent `switch` statements. Class/function
+  declaration metadata is bookkept because the pipeline emits the class and
+  function bodies separately; `DECLARE_CONST` renders as `const`.
 - Round-trip validity is not a goal: this is a decompiler listing.
 
 ## Dependencies

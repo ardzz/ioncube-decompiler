@@ -1,5 +1,6 @@
 """Array-literal families: ADD_ARRAY_ELEMENT continuation (the collectArray
-run's statement-level tail), ADD_ARRAY_UNPACK, the specialized IN_ARRAY.
+run's statement-level tail), ADD_ARRAY_UNPACK, the specialized IN_ARRAY and
+ARRAY_KEY_EXISTS.
 
 Semantics follow dawwinci/ioncube-php8-decompiler (MIT License,
 Copyright (c) 2026 dawwinci), decompiler/handlers/arrays.py:22-53.
@@ -74,3 +75,19 @@ def _in_array(ctx: LiftContext, i: int, end: int) -> int:
     if n.ext & 1:
         args.append("true")
     return ctx.def_temp(n, "in_array(" + ", ".join(args) + ")", i)
+
+
+@opcode_handler(192)  # ARRAY_KEY_EXISTS
+def _array_key_exists(ctx: LiftContext, i: int, end: int) -> int:
+    # op1 = key, op2 = array; the result feeds the following branch
+    n = ctx.nodes[i]
+    r = ctx.render
+    return ctx.def_temp(
+        n,
+        "array_key_exists("
+        + r.ch(r.ex_op1(n))
+        + ", "
+        + r.ch(r.ex_op2(n))
+        + ")",
+        i,
+    )

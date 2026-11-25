@@ -215,6 +215,117 @@ def _table_pairs(ctx: LiftContext, i: int):
     return cases, None
 
 
+def emit_match_table(ctx: LiftContext, i: int, end: int) -> int | None:
+    """Direct MATCH arm-table form -> strict switch over the table keys.
+
+    The encoder lowers `match ($x) { 'a' => ..., default => ... }` to a
+    MATCH node whose op2 is a serialized key->node table, followed by the
+    arm bodies and their JMPs to the merge.  `match` compares with ``===``;
+    a plain switch is loose, so emit ``switch (true)`` with ``subject ===
+    key`` cases.  The subject expression is repeated per case (a listing
+    simplification; the observed subjects are pure reads).
+    """
+    from .emitter import emit_region
+
+    n = ctx.nodes[i]
+    e = n.ent.get("op2")
+    if not e or e.kind != 1 or e.raw >= len(ctx.zvals):
+        return None
+    z = ctx.zvals[e.raw]
+    if (z.get("type", 0) & 0xFF) != 7 or "str" not in z:
+        return None
+    pairs = decode_serarr(z["str"])
+    if not pairs:
+        return None
+    targets = []
+    for _key, target in pairs:
+        if not (isinstance(target, int) and i < target < ctx.thr):
+            return None
+        targets.append(target)
+    uniq = sorted(set(targets))
+    maxT = uniq[-1]
+    # the first JMP after the last arm target is its terminal JMP to the
+    # merge; the default arm starts immediately after it
+    caseJmp = None
+    for k in range(maxT, min(end, ctx.thr)):
+        if ctx.op[k] == 42:
+            raw = ctx.nodes[k].ent.get("op1")
+            if raw is not None and raw.kind == 0 and raw.raw > maxT:
+                caseJmp = k
+                break
+    if caseJmp is None:
+        return None
+    defaultStart = caseJmp + 1
+    merge = ctx.nodes[caseJmp].ent["op1"].raw
+    if not (defaultStart < merge <= ctx.thr):
+        return None
+    hasDefault = ctx.op.get(defaultStart) not in (70, 127)
+    subj = n.ent.get("op1")
+    subjSlot = n.op1 // 16 if subj is not None and (subj.kind & 6) else None
+    freeK = None
+    if subjSlot is not None:
+        for k in range(merge - 1, maxT - 1, -1):
+            if ctx.op.get(k) not in (70, 127):
+                continue
+            e1 = ctx.nodes[k].ent.get("op1")
+            if e1 is not None and (e1.kind & 6) and e1.raw == subjSlot:
+                freeK = k
+                break
+    stop = freeK + 1 if freeK is not None else merge
+    # the merge node reads the match result from a temp; materialize that
+    # temp inside the cases (QM_ASSIGN looks it up in ctx.meta)
+    mergeNode = ctx.nodes[merge]
+    resultSlot = None
+    for which in ("op1", "op2"):
+        me = mergeNode.ent.get(which)
+        if me is not None and (me.kind & 6):
+            resultSlot = getattr(mergeNode, which) // 16
+            break
+    if resultSlot is None:
+        return None
+    groups: dict[int, list] = {}
+    for key, target in pairs:
+        groups.setdefault(target, []).append(key)
+    subjTxt = ctx.render.ch(ctx.render.ex_op1(n))
+    prevResult = ctx.meta.get("matchResultSlot")
+    ctx.meta["matchResultSlot"] = resultSlot
+    ctx.line(n)
+    # match uses strict identity; switch(true) with === case expressions
+    # preserves that (a plain switch would use loose ==)
+    ctx.w("switch (true) {")
+    ctx.idp += 1
+    ctx.loop_stack.append(LoopInfo(frozenset({merge}), frozenset()))
+    ends = uniq[1:] + [defaultStart if hasDefault else merge]
+    for t, bodyEnd in zip(uniq, ends):
+        for key in groups[t]:
+            ktxt = (
+                php_quote(key.encode("latin-1")) if isinstance(key, str) else str(key)
+            )
+            ctx.w("case (" + subjTxt + ") === " + ktxt + ":")
+        ctx.idp += 1
+        emit_region(ctx, t, min(bodyEnd, stop))
+        # the arm's terminal JMP to the merge is a switch break; emit it
+        # explicitly (the region emitter bookkeeps the JMP itself)
+        if not (ctx.out and ctx.out[-1].strip() == "break;"):
+            ctx.w("break;")
+        ctx.idp -= 1
+    if hasDefault:
+        ctx.w("default:")
+        ctx.idp += 1
+        emit_region(ctx, defaultStart, stop)
+        ctx.idp -= 1
+    ctx.loop_stack.pop()
+    ctx.idp -= 1
+    ctx.w("}")
+    if prevResult is None:
+        ctx.meta.pop("matchResultSlot", None)
+    else:
+        ctx.meta["matchResultSlot"] = prevResult
+    ctx.emitted += 1
+    ctx.bk(i)
+    return stop
+
+
 def emit_match(ctx: LiftContext, i: int, end: int) -> int | None:
     """The PHP 8 match-expression lowering as the evaluation encoder emits
     it — NOT a CASE chain, so emit_switch does not recognize it:
@@ -501,4 +612,10 @@ def emit_match(ctx: LiftContext, i: int, end: int) -> int | None:
     return stop
 
 
-__all__ = ["emit_case", "emit_match", "emit_switch", "emit_switch_header"]
+__all__ = [
+    "emit_case",
+    "emit_match",
+    "emit_match_table",
+    "emit_switch",
+    "emit_switch_header",
+]

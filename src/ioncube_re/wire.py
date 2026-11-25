@@ -27,7 +27,7 @@ from .container import i32, u16, u32
 from .crypto.keytable import kt_generate
 from .crypto.layerb import EVAL_KEY, component_decrypt
 from .interned import interned_name
-from .opcodes import HANDLER2OP, OPNAMES
+from .opcodes import HANDLER2OP, OPNAMES, wire_to_internal
 
 
 class WireError(Exception):
@@ -443,8 +443,9 @@ def _php_addcslashes(s: bytes) -> str:
 
 def fmt_node(n: dict, zvals: list[dict]) -> str:
     f0 = n["trueop"] if n["trueop"] is not None else n["final"]
-    if f0 is not None and f0 in OPNAMES:
-        opn = OPNAMES[f0]
+    fdisp = f0 if n["trueop"] is not None else wire_to_internal(f0)
+    if fdisp is not None and fdisp in OPNAMES:
+        opn = OPNAMES[fdisp]
     elif f0 is not None:
         opn = f"op{f0}"
     else:

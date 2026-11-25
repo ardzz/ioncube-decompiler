@@ -19,8 +19,9 @@ analysis passes below are its __init__ verbatim, plus the loop_stack /
 goto-target state the structurer upgrades need). The three documented
 wire ABI facts each live in exactly ONE place:
 
-  * the +2 anti-tamper garble table — ``_ungarble`` below, extended by the
-    SWITCH_LONG/SWITCH_STRING pair;
+  * the wire→internal opcode translation — ``opcodes.WIRE_TO_INTERNAL``
+    for raw wire finals, plus the internal trueop normalizations in
+    ``_ungarble`` below;
   * the CV-slot +5 rule — operand.py ``OperandRenderer.ex`` (the x86_64
     ABI: slot numbering starts at execute_data's 5 slots, loader-verified);
   * the DO-node stopping point — collectors.py.

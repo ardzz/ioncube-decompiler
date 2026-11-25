@@ -338,13 +338,28 @@ def test_bookkeeping_set_counts_once():
     assert out(l) == ""
 
 
-def test_declare_comment_form():
+def test_declare_class_is_bookkeeping():
+    # the class skeleton is pre-opened from these operands by the pipeline;
+    # the node itself carries no rendered statement
     l = mk(
         [(144, {"op1": (1, 0), "op2": (1, 1)}, {}, 0)],
         zvals=[{"type": 6, "str": b"m"}, {"type": 6, "str": b"p"}],
     )
     emit_node(l, 0, l.thr)
-    assert "/* DECLARE_CLASS op1=string('m') op2=string('p') */" in out(l)
+    assert out(l) == ""
+    assert l.bookkept == 1
+
+
+def test_declare_const_renders_a_const_statement():
+    l = mk(
+        [(143, {"op1": (1, 0), "op2": (1, 1)}, {}, 0)],
+        zvals=[
+            {"type": 6, "str": b"BASE_CONF_DIR"},
+            {"type": 6, "str": b"/etc/apache2/"},
+        ],
+    )
+    emit_node(l, 0, l.thr)
+    assert "const BASE_CONF_DIR = '/etc/apache2/';" in out(l)
 
 
 # ---- registry shape over the family modules ----

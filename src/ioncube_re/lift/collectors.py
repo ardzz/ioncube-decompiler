@@ -47,6 +47,29 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
             callee = None
     else:
         callee = None
+    if name is None and op in (112, 118):
+        # a dynamic method name: $this->$method(...).  The callee is a
+        # CV/temp, not an interned zval; the receiver renderer handles
+        # the kind-0 $this marker.
+        e2 = n.ent.get("op2")
+        if e2 is not None and (e2.kind & 6 or e2.kind == 8):
+            dyn = r.ex(n, "op2")
+            if dyn and re.match(r"^\$", dyn):
+                name = dyn
+    if name is None and op == 113 and ctx.fnName == "__construct":
+        # the encoder stores parent-method names by heap address; at the
+        # end of a constructor a parent sentinel + one-arg call is the
+        # inherited parent::__construct($var) (the framework helper base)
+        e1 = n.ent.get("op1")
+        e2 = n.ent.get("op2")
+        if (
+            e1 is not None
+            and e1.kind == 0
+            and e1.raw == 514
+            and e2 is not None
+            and e2.kind == 0
+        ):
+            name = "__construct"
     if name is None and callee is None and op != 128:
         # the callee name is not recoverable (heap-pointer interned name) —
         # an unnameable call is a comment, not fabricated syntax
@@ -192,15 +215,22 @@ def collect_new(ctx: LiftContext, i: int, end: int) -> int:
         j += 1
     e = n.ent.get("res")
     if e and (e.kind & 6):
-        slot = n.res // 16
-        if len(ctx.tempUses.get(slot, [])) == 1:
-            ctx.tempExpr[slot] = expr
-        else:
-            # a multi-read ctor result keeps a named temp statement, the
-            # same contract as the multi-read DO_FCALL result
+        if e.kind & 4:
+            # a VAR result (not a TMP): the consumers read the variable
+            # slot directly ($V4), so emit the constructor as its
+            # assignment; the temp-slot expression would never be inlined
             ctx.line(n)
-            ctx.w(f"$V{slot - 5} = " + unwrap(expr) + ";")
-            ctx.tempExpr[slot] = expr
+            ctx.w(ctx.render.ch(ctx.render.ex(n, "res")) + " = " + unwrap(expr) + ";")
+        else:
+            slot = n.res // 16
+            if len(ctx.tempUses.get(slot, [])) == 1:
+                ctx.tempExpr[slot] = expr
+            else:
+                # a multi-read ctor result keeps a named temp statement, the
+                # same contract as the multi-read DO_FCALL result
+                ctx.line(n)
+                ctx.w(f"$V{slot - 5} = " + unwrap(expr) + ";")
+                ctx.tempExpr[slot] = expr
     ctx.emitted += 1
     for k in range(i + 1, j):
         if k not in consumed:

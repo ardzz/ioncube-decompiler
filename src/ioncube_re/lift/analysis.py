@@ -1,16 +1,18 @@
 """The context-build analysis passes: the wire normalizations that turn a
-parse result into the lifter's working state — the opcode map with the +2
-anti-tamper ungarble, the jump-target calibration, the +4 VAR-read slot
-shifts, the temp def/use registration, the try/catch records and the pool
-string resolution. Model.py owns the dataclasses; this module derives.
+parse result into the lifter's working state — the opcode map (official
+wire numbers translated to the internal table, plus the internal trueop
+normalizations), the jump-target calibration, the +4 VAR-read slot shifts,
+the temp def/use registration, the try/catch records and the pool string
+resolution. Model.py owns the dataclasses; this module derives.
 
-The +2 anti-tamper garble table lives HERE — one place, citing its
-derivation.
+The wire→internal opcode table lives in ``opcodes.WIRE_TO_INTERNAL``; the
+internal trueop normalizations live in ``_ungarble`` below.
 """
 
 from __future__ import annotations
 
 from ..container import i32, u32
+from ..opcodes import wire_to_internal
 from ..wire import WireReader
 
 # jump-target-calibrated opcodes (target = entry_value - 1)
@@ -89,7 +91,12 @@ def _for_inits(ctx) -> None:
 
 def _resolve_opcodes(ctx) -> None:
     for n in ctx.nodes:
-        f = n.trueop if n.trueop is not None else n.final
+        # trueop (arena/wD0) is already in the internal table; a raw wire
+        # final is in the official PHP 8.1/8.2 numbering and must be mapped
+        if n.trueop is not None:
+            f = n.trueop
+        else:
+            f = wire_to_internal(n.final)
         ctx.op[n.i] = f
         if f is None:
             ctx.masked += 1
@@ -103,17 +110,16 @@ def _unused(n: Node, wname: str) -> bool:
 
 
 def _ungarble(ctx) -> None:
-    """The +2 anti-tamper garble.
+    """Normalize the internal by-name/switch trueop shapes.
 
-    The encoder stores four opcodes +2: FETCH_THIS(182) as
-    ISSET_ISEMPTY_THIS(184) [res-only $this form; op1/op2 carry the
-    unused marker type0/0xffffffff], SEND_FUNC_ARG(183) as
-    SWITCH_LONG(185) [op2 = a small arg index 1..15; a real
-    SWITCH_LONG's op2 is a jumptable], SWITCH_LONG(185) as IN_ARRAY(187)
-    and SWITCH_STRING(186) as COUNT(188) [both res unused with a const
-    serialized jumptable in op2 — a real IN_ARRAY/COUNT always carries
-    a res temp]. The first two match the reference lifter; the switch
-    pair extends the same +2 family."""
+    The wire's official numbering is mapped to the internal table in
+    ``_resolve_opcodes`` (``opcodes.WIRE_TO_INTERNAL``), so the four +2 wire
+    forms are normally gone by the time this runs.  The same shapes can
+    still arrive as an arena/wD0 trueop, and these are the normalizations
+    the reference lifter applies: ISSET_ISEMPTY_THIS(184) with a res-only
+    ``$this`` form is FETCH_THIS(182); SEND_FUNC_ARG(183) can appear as
+    SWITCH_LONG(185) with a small arg index; the switch headers can appear
+    as IN_ARRAY(187)/COUNT(188) with a serialized jumptable in op2."""
 
     for n in ctx.nodes:
         f = ctx.op[n.i]
@@ -319,12 +325,15 @@ def _calibrate_jumps(ctx) -> None:
 
 
 def _shift_var_reads(ctx) -> None:
-    """One encoder generation encodes a VAR read of a call/NEW result 4
-    slots above the producer's res slot (V26 = DO_FCALL res; ASSIGN op2
-    = V30): the read's own slot has no def at/before the node, slot-4
-    is defined by a DO_FCALL/NEW before it. Normalize those reads to
-    slot-4 so the temp def/use analysis and the expression inlining
-    line up (eval-generation files never hit the pattern)."""
+    """Normalize VAR reads of call/NEW results across encoder generations.
+
+    One generation encodes a VAR read 4 slots above the producer's res slot
+    (V26 = DO_FCALL res; ASSIGN op2 = V30).  Another writes the result 6
+    slots above the VAR slot read by the immediately following ASSIGN
+    (DO res slot 15, ASSIGN op2 slot 9).  Both are normalized to the
+    producer's slot so the temp def/use analysis and the expression
+    inlining line up.
+    """
     defs: dict[int, int] = {}
     for n in ctx.nodes:
         e = n.ent.get("res")
@@ -336,6 +345,18 @@ def _shift_var_reads(ctx) -> None:
             if not e or not (e.kind & 4):
                 continue  # VAR reads only
             slot = getattr(n, wname) // 16
+            if n.i > 0 and ctx.op[n.i - 1] in _DO:
+                # this encoder generation writes the call result 6 slots
+                # above the VAR slot the immediately following ASSIGN reads
+                # (DO res slot 15, ASSIGN op2 slot 9); normalize the read to
+                # the producer so the call inlines into the assignment.
+                p = ctx.nodes[n.i - 1]
+                pe = p.ent.get("res")
+                if pe is not None and (pe.kind & 6):
+                    pslot = p.res // 16
+                    if pslot == slot + 6:
+                        ctx.effSlot[f"{n.i}:{wname}"] = pslot
+                        continue
             if slot in defs and defs[slot] < n.i:
                 continue  # own def precedes: real slot
             d4 = defs.get(slot - 4)

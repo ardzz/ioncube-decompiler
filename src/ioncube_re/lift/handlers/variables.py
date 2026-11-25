@@ -1,14 +1,15 @@
 """Variable/assignment families: ASSIGN and its compound/property/dim
 forms (with the OP_DATA value-inlining), the FETCH var-by-name family
-(superglobals / $GLOBALS), FETCH_CONSTANT, ROPE string interpolation,
-isset/empty on vars and dims, unset, and the inc/dec statements."""
+(superglobals / $GLOBALS), FETCH_CONSTANT / FETCH_CLASS_CONSTANT, ROPE
+string interpolation, isset/empty on vars and dims, unset, and the
+inc/dec statements."""
 
 from __future__ import annotations
 
 import re
 
 from ..model import LiftContext
-from ..operand import bare, php_quote, prop_txt, unwrap, zval_name
+from ..operand import bare, class_ref, php_quote, prop_txt, unwrap, zval_name
 from ..registry import opcode_handler
 
 _SUPERGLOBALS = (
@@ -33,7 +34,7 @@ _PUREDEF = (
     frozenset(range(80, 99))
     | frozenset(range(1, 22))
     | frozenset(range(173, 179))
-    | {31, 51, 52, 53, 99, 121, 123, 138, 169, 170}
+    | {31, 51, 52, 53, 99, 121, 123, 138, 169, 170, 179, 192}
     | {60, 68, 71, 129, 130, 131}
 )
 
@@ -359,6 +360,30 @@ def _fetch_constant(ctx: LiftContext, i: int, end: int) -> int:
         # defines are almost always global — render the last segment
         c = c.rsplit("\\", 1)[-1]
     return ctx.def_temp(n, c, i)
+
+
+@opcode_handler(179)  # FETCH_CLASS_CONSTANT
+def _fetch_class_constant(ctx: LiftContext, i: int, end: int) -> int:
+    n = ctx.nodes[i]
+    r = ctx.render
+    # op1 is the resolved class name, op2 the constant name; both are
+    # normally string zvals.  Fully qualify the class: a recovered
+    # `namespace` would otherwise capture a relative name.
+    cls = None
+    e1 = n.ent.get("op1")
+    if e1 is not None and e1.kind == 1 and e1.raw < len(ctx.zvals):
+        cls = zval_name(ctx.zvals[e1.raw])
+    if cls is not None:
+        cls = class_ref(cls)
+    else:
+        cls = r.ch(r.ex_op1(n))
+    const = None
+    e2 = n.ent.get("op2")
+    if e2 is not None and e2.kind == 1 and e2.raw < len(ctx.zvals):
+        const = zval_name(ctx.zvals[e2.raw])
+    if const is None:
+        const = bare(r.ch(r.ex_op2(n)))
+    return ctx.def_temp(n, cls + "::" + const, i)
 
 
 @opcode_handler(54)  # ROPE_INIT (string interpolation)

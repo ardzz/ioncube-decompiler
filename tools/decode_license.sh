@@ -2,7 +2,7 @@
 # decode_license.sh - print the contents of an ionCube license file.
 #
 # Usage:
-#   decode_license.sh <license-file> <passphrase> [key32]
+#   decode_license.sh <license-file> <passphrase> [key32]   // ggignore Git Guardian False Positive
 #
 # make_license's --decode-license is normally enough when the license was
 # produced by the bundled make_license.  Some licenses bind the decryption key

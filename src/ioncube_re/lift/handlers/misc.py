@@ -207,12 +207,20 @@ def _declare_lambda(ctx: LiftContext, i: int, end: int) -> int:
             uses.append(("&" if nj.ext & 1 else "") + ctx.cv_name(ne2.raw))
         j += 1
     clause = (" use (" + ", ".join(uses) + ")") if uses else ""
-    # the closure body renders from its nested sub-wire (pipeline
-    # pre-pass, source order); without one the placeholder comment stands
+    # the closure body renders from its nested sub-wire: a pre-rendered
+    # main-tail body or the lazy outer sub-wire queue (source order, so
+    # nested closures consume their own components recursively)
     expr = f"function (){clause} {{ /* closure body: the {{closure}} component */ }}"
+    item = None
     bodies = ctx.meta.get("closureBodies")
     if bodies:
-        sig, ret, stmts = bodies.pop(0)
+        item = bodies.pop(0)
+    if item is None:
+        getter = ctx.meta.get("closure_at")
+        if getter is not None:
+            item = getter()
+    if item is not None:
+        sig, ret, stmts = item
         # strip the listing's line markers + the accounting comment: the
         # arrow-fn detection needs the bare statement text
         core = re.sub(r"(?m)^\s*// line \d+\s*$\n?", "", stmts)

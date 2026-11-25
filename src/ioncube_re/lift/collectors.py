@@ -244,11 +244,26 @@ def collect_array(ctx: LiftContext, i: int, end: int) -> int:
     items = []
     j = i
     consumed: set[int] = set()
+    # the literal's result slot: an ADD_ARRAY_ELEMENT with a different res
+    # belongs to an OUTER array whose build was interrupted by this nested
+    # one (GraphQL field tables); stop so the statement-level handler can
+    # extend the outer literal instead of swallowing the element.
+    e0 = n.ent.get("res")
+    array_slot = n.res // 16 if e0 is not None and (e0.kind & 6) else None
     while j < end:
         o = ctx.op[j]
         if o is not None and (o == 72 or (o == 71 and j == i)):
             # ADD_ARRAY_ELEMENT continues the run; INIT_ARRAY only starts it
             nj = ctx.nodes[j]
+            ne = nj.ent.get("res")
+            add_slot = nj.res // 16 if ne is not None and (ne.kind & 6) else None
+            if (
+                j != i
+                and array_slot is not None
+                and add_slot is not None
+                and add_slot != array_slot
+            ):
+                break
             v = r.ch(r.ex_op1(nj))
             k = r.ex(nj, "op2") if nj.ent.get("op2") else None
             items.append(

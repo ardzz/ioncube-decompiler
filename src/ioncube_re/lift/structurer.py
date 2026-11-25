@@ -21,6 +21,15 @@ _SC_PURE = (
 )
 
 
+def _ternary_paren(e: str) -> str:
+    """Parenthesize a nested ternary spliced into another ternary.
+
+    PHP 8 rejects the old left-associative unparenthesized form
+    (``a ? b : c ? d : e``); the extra parentheses keep the same parse.
+    """
+    return "(" + e + ")" if e and "?" in e else e
+
+
 def loop_exit_stmt(ctx: LiftContext, target: int) -> str | None:
     """break;/continue; with level."""
     for depth, loop in enumerate(reversed(ctx.loop_stack), start=1):
@@ -311,7 +320,10 @@ def _ternary_chain(ctx: LiftContext, i: int, end: int) -> tuple[int, int] | None
         return None
     expr = b
     for condTxt, v in reversed(levels):
-        expr = f"({condTxt} ? {v} : {expr})"
+        expr = (
+            f"({_ternary_paren(condTxt)} ? {_ternary_paren(v)} : "
+            f"{_ternary_paren(expr)})"
+        )
     # the whole span is consumed; the result lives in the linker output slot
     ctx.tempExpr[outSlot] = expr
     ctx.tempDef[outSlot] = k - 1
@@ -431,7 +443,10 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
         arms = _ternary_arms(ctx, i, t, skip)
         if arms is not None:
             slot, a, b = arms
-            ctx.tempExpr[slot] = f"({condTxt} ? {a} : {b})"
+            ctx.tempExpr[slot] = (
+                f"({_ternary_paren(condTxt)} ? {_ternary_paren(a)} : "
+                f"{_ternary_paren(b)})"
+            )
             # the construct's effective def point is its END (the else
             # arm) so the single use inlines past the consumed JMP
             ctx.tempDef[slot] = skip - 1

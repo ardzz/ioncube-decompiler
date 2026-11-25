@@ -122,6 +122,10 @@ def lift_file(
     with open(path, "rb") as f:
         data = f.read()
     isProd = data[:12] == b"<?php //ICB0"
+    # the 00447 generation's method descriptors carry method/param/local
+    # names (not class records); other eval generations keep class groups
+    disableRecClasses = data.startswith(b"<?php //00447")
+    classFile = os.path.basename(path).endswith((".class.php", ".class"))
 
     if isProd:
         pr = prod_decode_file(path, chunk)
@@ -371,6 +375,44 @@ def lift_file(
             prevN = off + size
     mainMeta["closureBodies"] = closureBodies
 
+    # ---- outer sub-wire closures ----
+    # Method bodies live in the outer sub-wire stream, and their {closure}
+    # components follow the declaring method in source order.  Render them
+    # lazily: a DECLARE_LAMBDA site consumes the next component, so a
+    # closure body's own nested sites consume the nested components that
+    # follow it (depth-first source order).
+    outerClosures: list[tuple[dict, bytes, tuple]] = [
+        (r, wirebytes, recSeeds)
+        for (r, _rec, wirebytes, _off, recSeeds) in subMeta
+        if fn_name_of(r) is not None and fn_name_of(r).endswith("{closure}")
+    ]
+
+    def nextOuterClosure():
+        if not outerClosures:
+            return None
+        r, wirebytes, recSeeds = outerClosures.pop(0)
+        try:
+            der = offline_parse(
+                wirebytes, recSeeds, offlineIerg, offlineX, not isProd
+            )
+            rr = der[0] if der is not None else r
+            cm: dict = {
+                "isFn": True,
+                "cv": cv_names(rr, "eval", []),
+                "closure_at": nextOuterClosure,
+            }
+            cctx = LiftContext.build(wirebytes, rr, cm)
+            cctx.valid_php = valid_php
+            cctx.idp = 1
+            body = walk_component(cctx).strip("\n")
+            _specs, ret = arg_specs(rr)
+            sig = ", ".join(param_list(cctx))
+            return (sig, ret or "", body)
+        except Exception:
+            return None
+
+    mainMeta["closure_at"] = nextOuterClosure
+
     liftOne(
         mainWire,
         mainR,
@@ -561,6 +603,22 @@ def lift_file(
         mainParent = mainDecl[1] if mainDecl else None
         if mainCls is None and mainDecl:
             mainCls = mainDecl[0]
+        if mainCls is not None and mainDecl is None and mainR["thr"] <= 1:
+            # a trivial main component whose filename hint matches a
+            # sub-function leaf is a function file, not a class: emit its
+            # namespace and keep the function top-level (json_decode.php)
+            leaf_l = mainCls.rsplit("\\", 1)[-1].lower()
+            match_fn = None
+            for _sm in subMeta:
+                sfn = fn_name_of(_sm[0])
+                if sfn and sfn.rsplit("\\", 1)[-1].lower() == leaf_l:
+                    match_fn = sfn
+                    break
+            if match_fn is not None:
+                ns = match_fn.rsplit("\\", 1)[0] if "\\" in match_fn else None
+                if ns:
+                    out.append(f"\nnamespace {ns};\n")
+                mainCls = None
         if mainCls is not None:
             ns = None
             clsLeaf = mainCls
@@ -612,7 +670,12 @@ def lift_file(
     for si, sm in enumerate(subMeta):
         r, rec, wirebytes, off, recSeeds = sm
         fn = fn_name_of(r)
-        meta = {"isFn": True, "fnName": fn, "recSeeds": recSeeds}
+        meta = {
+            "isFn": True,
+            "fnName": fn,
+            "recSeeds": recSeeds,
+            "closure_at": nextOuterClosure,
+        }
         meta["cv"] = cv_names(r, "prod" if isProd else "eval", rec)
         if not isProd:
             for k, an in enumerate(arg_names(r)):  # authoritative arg names
@@ -644,9 +707,13 @@ def lift_file(
                 classRec = s
                 break
         if classRec is None and capsRun:
-            classRec = rec[0]
-            if capsRun > 1 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", rec[1]):
-                parentRec = rec[1]
+            # a rec of just the current method name (`['SSL']`,
+            # `['Fail2ban']`) is not a class record; treating it as one
+            # opens bogus class groups inside the already-open main class
+            if rec and rec[0] != fn:
+                classRec = rec[0]
+                if capsRun > 1 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", rec[1]):
+                    parentRec = rec[1]
         # the declared class was found after the ancestor run: the next
         # capitalized non-fn string after it is still the parent
         # (gt_diverse3 ctor: ['name', 'Dog', 'Animal', ...] -> extends Animal)
@@ -662,9 +729,13 @@ def lift_file(
                 ):
                     parentRec = s
                     break
-        # when the class is found after the ancestor run, the run holds a
-        # SIBLING class record (gdiverse4: the enum Suit block precedes
-        # Card) — no parent is recoverable from it
+        # eval descriptor records in method components are method/parameter/
+        # local names, not additional class declarations: the main class
+        # skeleton (when there is one) is authoritative, and function-file
+        # components stay top-level.  Production keeps its class-group logic.
+        if not isProd and (evalMainOpen or disableRecClasses or not classFile):
+            classRec = None
+            parentRec = None
         if not isProd and not prodClassOpen:
             if evalMainOpen and classRec is not None:
                 # the first descriptor-named class group is the main class

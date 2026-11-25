@@ -120,7 +120,9 @@ def offline_parse(wire: bytes, seeds, ierg: int | None, x: int, sig_gate: bool):
         # whole components (CannedResponse::getResponseWithTagsReplaced etc.,
         # 461-file sweep.
         lastf = r["nodes"][-1]["final"]
-        if lastf not in (62, 201):  # RETURN / VERIFY_NEVER_TYPE (wire numbering)
+        # RETURN, or VERIFY_NEVER_TYPE in either the current wire numbering
+        # (201) or the older eval generations' internal numbering (199)
+        if lastf not in (62, 199, 201):
             return None
         from . import wd0
 

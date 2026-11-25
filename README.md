@@ -119,6 +119,16 @@ Requirements and limits:
 This loader-build check is independent of the lifting pipeline's supported
 formats in the next section.
 
+### Comments and docblocks
+
+ionCube preserves docblocks attached to declarations, and `lift` re-emits the
+main class docblock from the wire (the same offline tail record used by the
+production skeleton). Ordinary comments (`//`, `#`, and `/* ... */` inside
+function bodies) are discarded by the PHP compiler and are not present in the
+encoded file, so they cannot be recovered. The `/* ... */` annotations in the
+output (`opcode masked`, `callee name not recoverable`, unhandled opcodes) are
+the decompiler's own markers, not recovered source comments.
+
 ## Supported formats
 
 | what | supported |

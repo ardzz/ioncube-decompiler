@@ -573,6 +573,9 @@ def lift_file(
                     mainParent = "\\" + mainParent.lstrip("\\")
             if ns:
                 out.append(f"\nnamespace {ns};\n")
+            doc = tail_doccomment(stream, boff + bsize)
+            if doc is not None:
+                out.append("\n" + doc + "\n")
             out.append(
                 f"\nclass {clsLeaf}"
                 + (f" extends {mainParent}" if mainParent else "")

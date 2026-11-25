@@ -42,3 +42,12 @@ def test_non_decimal_payload_is_rejected():
 def test_missing_file_is_rejected(tmp_path):
     with pytest.raises(LicenseKeyError):
         extract_license_key(str(tmp_path / "nope.php"))
+
+
+def test_missing_bootstrap_is_rejected(tmp_path):
+    encoded = tmp_path / "encoded.php"
+    encoded.write_text("<?php\n", encoding="utf-8")
+    with pytest.raises(LicenseKeyError):
+        extract_license_key(
+            str(encoded), bootstrap=str(tmp_path / "no-such-bootstrap.php")
+        )

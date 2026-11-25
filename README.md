@@ -76,7 +76,7 @@ server-side.
 | `ioncube-re stream decode\|decode-raw\|components\|prod\|verify\|verify-raw` | frame codec + raw DEFLATE; production ICB0 multi-version chunks |
 | `ioncube-re wire [--ktab K] [--arena A] [--offline --seeds A,B --ierg 0x.. \| --stream --mainblob B] [--gt GT] FILE...` | wire-grammar walk, node assembly, offline keytable demask, gt cross-check |
 | `ioncube-re lift FILE [--chunk N] [--gt GT] [--no-auto] [--m5-dir D] [--valid-php] [--ierg 0xKEY]` | oplines → PHP source (typed signatures, interned names, switch/ternary structuring, opt-in goto-label fallback). `--ierg` overrides the stored keytable mask for license-bound/dynamic-key files, whose stored mask is a decoy. |
-| `ioncube-re license-key FILE... [--php PHP]` | extract the real keytable mask of a license-bound/dynamic-key file through the installed ionCube Loader (see below) |
+| `ioncube-re license-key FILE... [--php PHP] [--bootstrap PHP_FILE]` | extract the real keytable mask of a license-bound/dynamic-key file through the installed ionCube Loader (see below) |
 
 Exit codes: 0 ok, 1 usage/io, 2 verification/walk failure.
 
@@ -102,6 +102,10 @@ ioncube-re lift path/to/encoded.php --ierg 0x1234abcd
 `ioncube_re.license_key.extract_license_key()` exposes the same operation,
 and `decode_mykey()` / `mask_from_mykey()` document the property decoding.
 `tools/extract_license_key.py` is a thin wrapper around the CLI command.
+
+If the encoded file needs a base class or other dependency at load time,
+pass `--bootstrap PHP_FILE`; the harness requires it before the target
+(file example: a report class extending the vendor FPDF class):
 
 Requirements and limits:
 

@@ -126,21 +126,30 @@ def _stderr_tail(proc: subprocess.Popen) -> str:
 
 
 def extract_license_key(
-    encoded: str, php: str = "php", timeout: float = 20.0
+    encoded: str,
+    php: str = "php",
+    timeout: float = 20.0,
+    bootstrap: str | None = None,
 ) -> int:
     """Return the loader's effective keytable mask for ``encoded``.
 
     Runs ``php`` on a temporary harness that includes ``encoded``, waits for
     the loader to finish, then reads the mask from the loader's .bss.
+    ``bootstrap`` is an optional plain- or encoded PHP file required before
+    the target (e.g. the base FPDF class a report class extends).
     The encoded file's top-level executes (see the module warning).
     """
     if not os.path.isfile(encoded):
         raise LicenseKeyError(f"not a file: {encoded}")
+    if bootstrap is not None and not os.path.isfile(bootstrap):
+        raise LicenseKeyError(f"bootstrap is not a file: {bootstrap}")
     fd, harness = tempfile.mkstemp(suffix=".php", prefix="ioncubekey-")
     try:
         with os.fdopen(fd, "w") as f:
+            f.write("<?php\n")
+            if bootstrap is not None:
+                f.write(f"require {_php_quote(os.path.abspath(bootstrap))};\n")
             f.write(
-                "<?php\n"
                 f"include {_php_quote(os.path.abspath(encoded))};\n"
                 'echo "READY\\n";\n'
                 "sleep(30);\n"

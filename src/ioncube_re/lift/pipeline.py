@@ -31,6 +31,7 @@ from .wires import (
     classrec_strings,
     desc_strings,
     pool_strings,
+    record_seed_candidates,
     record_seeds,
     scan_wires,
     tail_doccomment,
@@ -151,12 +152,16 @@ def lift_file(
     subs = scan_wires(stream, boff + bsize)
     prevEnd = boff + bsize
     subMeta = []
+    subSeedCandidates: list[list[tuple[int, int]]] = []
     for off, size, r in subs:
         rec = desc_strings(stream, prevEnd, off - 4)
         # the descriptor stores the DECLARED record size (u32 before the
         # wire), which covers any trailing nested-record region; the seed
         # lookup must match that word, not the wire end scan_wires returns
         decl = u32(stream, off - 4) if off >= 4 else size
+        subSeedCandidates.append(
+            record_seed_candidates(stream, prevEnd, off - 4, decl)
+        )
         subMeta.append(
             (
                 r,
@@ -177,6 +182,9 @@ def lift_file(
         for off, size, r in nested:
             rec = desc_strings(mainWire, prevN, off - 4)
             decl = u32(mainWire, off - 4) if off >= 4 else size
+            subSeedCandidates.append(
+                record_seed_candidates(mainWire, prevN, off - 4, decl)
+            )
             subMeta.append(
                 (
                     r,
@@ -256,6 +264,18 @@ def lift_file(
         if "opSrc" not in meta and offlineIerg is not None:
             seeds = mainSeeds if not meta.get("isFn") else meta.get("recSeeds")
             der = offline_parse(wire, seeds, offlineIerg, offlineX, not isProd)
+            if der is None:
+                # the descriptor region can hold more than one size/marker
+                # match; validate the alternatives with the keytable gate
+                for cand in meta.get("seedCandidates", []):
+                    if cand == seeds:
+                        continue
+                    der = offline_parse(
+                        wire, cand, offlineIerg, offlineX, not isProd
+                    )
+                    if der is not None:
+                        meta["recSeeds"] = cand
+                        break
             if der is not None:
                 # the offline resolver supersedes the arena path: the wD0
                 # table map is complete (669 handlers) where HANDLER2OP
@@ -674,6 +694,9 @@ def lift_file(
             "isFn": True,
             "fnName": fn,
             "recSeeds": recSeeds,
+            "seedCandidates": (
+                subSeedCandidates[si] if si < len(subSeedCandidates) else []
+            ),
             "closure_at": nextOuterClosure,
         }
         meta["cv"] = cv_names(r, "prod" if isProd else "eval", rec)

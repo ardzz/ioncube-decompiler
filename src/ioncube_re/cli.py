@@ -587,7 +587,9 @@ def cmd_license_key(a):
     rc = 0
     for FILE in a.files:
         try:
-            mask = extract_license_key(FILE, php=a.php)
+            mask = extract_license_key(
+                FILE, php=a.php, bootstrap=a.bootstrap
+            )
         except LicenseKeyError as e:
             print(f"license-key: {FILE}: {e}", file=sys.stderr)
             rc = 1
@@ -703,6 +705,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lk.add_argument("files", nargs="+")
     lk.add_argument("--php", default="php", help="PHP CLI binary [php]")
+    lk.add_argument(
+        "--bootstrap",
+        default=None,
+        help="PHP file required before the target (base class/dependency)",
+    )
     lk.set_defaults(fn=cmd_license_key)
     return p
 

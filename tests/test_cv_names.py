@@ -59,3 +59,15 @@ def test_cv_names_multi_arg():
     assert cv_names(r, "prod", []) == {
         0: "ostate", 1: "country", 2: "sc", 3: "state",
     }
+
+
+def test_cv_names_eval_skips_component_docblock():
+    # eval pool: 2-byte prefix, fnName, docblock, then the CV names
+    pool = (
+        b"\x00\x00ajaxHandler\x00"
+        b"/** The Handler for all ajax events */\x00"
+        b"return\x00formData\x00"
+    )
+    r = make_r(pool, nargs=0, max_slot=1)
+    r["zvals"] = []
+    assert cv_names(r, "eval", []) == {0: "return", 1: "formData"}

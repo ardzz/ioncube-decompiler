@@ -129,30 +129,30 @@ def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int
                 subj = ctx.tempExpr[subj_slot]
     if subj is None:
         subj = ctx.render.ex_op1(ctx.nodes[i])
-    # switch end: the subject temp's FREE when one exists (php-src frees the
-    # subject right after the dispatch), else the furthest-forward JMP out of
-    # the case bodies
-    switchEnd = None
+    # switch end: the furthest forward JMP out of the case bodies, then the
+    # subject temp's canonical FREE on that exit path.  Early-return paths
+    # inside a case also FREE the subject (one observed switch frees it at
+    # node 20 before the first case body's return); scanning from the first
+    # case start would mistake that for the switch end and re-emit the body.
+    X = maxT + 1
+    while True:
+        cand = X
+        for k in range(minT, X):
+            if ctx.op.get(k) == 42:
+                t = ctx.jt.get(k, -1)
+                if t > k and t > cand:
+                    cand = t
+        if cand == X:
+            break
+        X = cand
+    switchEnd = X
     if subj_slot is not None:
-        for k in range(stop, min(end, ctx.thr - 1) + 1):
+        freeAt = None
+        for k in range(maxT, min(X, ctx.thr - 1) + 1):
             if ctx.op[k] in (70, 127) and ctx.nodes[k].op1 // 16 == subj_slot:
-                switchEnd = k
-                break
-    if switchEnd is None:
-        # fixpoint: the switch end grows only from JMPs that EXIT from
-        # inside the current span — post-switch jumps are never scanned
-        X = maxT + 1
-        while True:
-            cand = X
-            for k in range(minT, X):
-                if ctx.op.get(k) == 42:
-                    t = ctx.jt.get(k, -1)
-                    if t > k and t > cand:
-                        cand = t
-            if cand == X:
-                break
-            X = cand
-        switchEnd = X
+                freeAt = k
+        if freeAt is not None:
+            switchEnd = freeAt
     entries = [(c["val"], c["target"], c["caseNode"]) for c in cases]
     if default_target is not None and stop <= default_target < switchEnd:
         entries.append((None, default_target, None))

@@ -355,7 +355,7 @@ def _fetch_constant(ctx: LiftContext, i: int, end: int) -> int:
         c = bare(r.ch(r.ex_op2(n)))
     else:
         # the compiler qualifies unqualified constants with the current
-        # namespace (`blesta\app\models\DS`); an undefined namespaced
+        # namespace (`vendor\app\models\DS`); an undefined namespaced
         # constant falls back to the global name at runtime, and real-world
         # defines are almost always global — render the last segment
         c = c.rsplit("\\", 1)[-1]
@@ -418,8 +418,16 @@ def _isset(ctx: LiftContext, i: int, end: int) -> int:
     r = ctx.render
     # ext carries the ISSET_ISEMPTY flag (ZEND_ISEMPTY): bit0 in the
     # production generation (empty -> ext=1), bit1 in the captured corpus
-    # (empty -> ext=2); either set means empty.
-    fn = "empty" if (n.ext & 3) else "isset"
+    # (empty -> ext=2); either set means empty.  The _VAR form over a zval
+    # superglobal name in one observed generation sets ext=2 for
+    # `isset($_POST)`, so only bit0 is the empty
+    # flag there; the CV form keeps the corpus bit1 rule.
+    e1 = n.ent.get("op1")
+    if op == 114 and e1 is not None and e1.kind == 1:
+        isEmpty = bool(n.ext & 1)
+    else:
+        isEmpty = bool(n.ext & 3)
+    fn = "empty" if isEmpty else "isset"
     if op == 115:  # _DIM_OBJ: op1[expr][dim]
         arg = r.ch(r.ex_op1(n)) + "[" + r.ch(r.ex_op2(n)) + "]"
     elif op == 114:  # _VAR: op1 may BE the name (empty($_POST) on a superglobal)

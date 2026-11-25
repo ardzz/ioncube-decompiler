@@ -33,7 +33,7 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
     name = r.callee_name(n, "op2")
     if name is not None and "\\" in name and op in (59, 61, 69):
         # an unqualified function call inside a namespace arrives with the
-        # ns-qualified name (`blesta\app\models\is_dir`); the runtime falls
+        # ns-qualified name (`vendor\app\models\is_dir`); the runtime falls
         # back to the global function — render the plain name
         name = name.rsplit("\\", 1)[-1]
     if op == 128:
@@ -152,9 +152,29 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
         e = doN.ent.get("res")
         if e and (e.kind & 6):
             slot = doN.res // 16
-            if len(ctx.tempUses.get(slot, [])) == 1:
+            uses = ctx.tempUses.get(slot, [])
+            if not uses:
+                # no registered reader: either the receiver of the next
+                # INIT (that use is excluded from tempUses) or a discarded
+                # call.  Never leave a dead `$Vn = call();` statement.
+                nxt = ctx.nodes[j + 1] if j + 1 < ctx.thr else None
+                e1 = nxt.ent.get("op1") if nxt is not None else None
+                if (
+                    nxt is not None
+                    and ctx.op.get(j + 1) in _INIT
+                    and e1 is not None
+                    and (e1.kind & 6)
+                    and nxt.op1 // 16 == slot
+                ):
+                    ctx.tempExpr[slot] = expr
+                    ctx.tempDef[slot] = j
+                else:
+                    ctx.line(n)
+                    ctx.w(unwrap(expr) + ";")
+            elif len(uses) == 1:
                 # the single reader inlines the call at its use
                 ctx.tempExpr[slot] = expr
+                ctx.tempDef[slot] = j
             else:
                 # a multi-read result (loop condition + row destructure)
                 # keeps a named temp statement: the later refs render the
@@ -215,22 +235,39 @@ def collect_new(ctx: LiftContext, i: int, end: int) -> int:
         j += 1
     e = n.ent.get("res")
     if e and (e.kind & 6):
-        if e.kind & 4:
+        slot = n.res // 16
+        uses = ctx.tempUses.get(slot, [])
+        if not uses:
+            nxt = ctx.nodes[j + 1] if j + 1 < ctx.thr else None
+            e1 = nxt.ent.get("op1") if nxt is not None else None
+            if (
+                nxt is not None
+                and ctx.op.get(j + 1) in _INIT
+                and e1 is not None
+                and (e1.kind & 6)
+                and nxt.op1 // 16 == slot
+            ):
+                ctx.tempExpr[slot] = expr
+                ctx.tempDef[slot] = n.i
+            else:
+                ctx.line(n)
+                ctx.w(unwrap(expr) + ";")
+        elif len(uses) == 1:
+            # single reader: inline the constructor expression there
+            ctx.tempExpr[slot] = expr
+            ctx.tempDef[slot] = n.i
+        elif e.kind & 4:
             # a VAR result (not a TMP): the consumers read the variable
             # slot directly ($V4), so emit the constructor as its
             # assignment; the temp-slot expression would never be inlined
             ctx.line(n)
             ctx.w(ctx.render.ch(ctx.render.ex(n, "res")) + " = " + unwrap(expr) + ";")
         else:
-            slot = n.res // 16
-            if len(ctx.tempUses.get(slot, [])) == 1:
-                ctx.tempExpr[slot] = expr
-            else:
-                # a multi-read ctor result keeps a named temp statement, the
-                # same contract as the multi-read DO_FCALL result
-                ctx.line(n)
-                ctx.w(f"$V{slot - 5} = " + unwrap(expr) + ";")
-                ctx.tempExpr[slot] = expr
+            # a multi-read ctor result keeps a named temp statement, the
+            # same contract as the multi-read DO_FCALL result
+            ctx.line(n)
+            ctx.w(f"$V{slot - 5} = " + unwrap(expr) + ";")
+            ctx.tempExpr[slot] = expr
     ctx.emitted += 1
     for k in range(i + 1, j):
         if k not in consumed:

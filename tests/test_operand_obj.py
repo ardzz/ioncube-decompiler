@@ -6,7 +6,7 @@
 """
 
 from ioncube_re.lift.model import LiftContext
-from ioncube_re.lift.operand import class_ref
+from ioncube_re.lift.operand import class_ref, zval_php
 
 
 def mk():
@@ -41,3 +41,12 @@ def test_class_ref_leaves_keywords_expressions_and_placeholders():
     for s in ("self", "parent", "static", "$cls", "(expr)",
               "self /*class-unresolved*/"):
         assert class_ref(s) == s
+
+
+def test_zval_php_parses_00442_class_constant_record():
+    # the 00442 generation tags the record @<n>:<n>:... instead of @:
+    raw = (
+        b"\x81@2054:517:512:2;@4528:64:1:0;s4'self262;431;1;22;"
+        b"@3696:64:0:0;s15'EMAIL_TYPE_HTML262;0;1;22;267;0;2;27;"
+    )
+    assert zval_php({"type": 267, "str": raw}, 0) == "self::EMAIL_TYPE_HTML"

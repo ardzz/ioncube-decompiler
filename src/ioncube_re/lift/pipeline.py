@@ -72,6 +72,67 @@ class PipelineError(Exception):
     pass
 
 
+def _descriptor_case_name(
+    stream: bytes, start: int, end: int, name: str
+) -> str | None:
+    """A descriptor record spelling of `name` with its original case.
+
+    The DECLARE_CLASS parent can be lowercased (`vendor_helpers`,
+    `vendor\module`); the tail class records preserve the source spelling.
+    Unlike :func:`class_like_names` this also matches un-namespaced names
+    (`Vendor_Helpers` has no backslash).
+    """
+    key = name.lower().lstrip("\\")
+    i = start
+    while i + 4 <= end:
+        ln = int.from_bytes(stream[i : i + 2], "little")
+        if (
+            0 < ln < 256
+            and stream[i + 2 : i + 4] == b"\x00\x20"
+            and i + 4 + ln <= end
+        ):
+            payload = (
+                stream[i + 4 : i + 4 + ln]
+                .split(b"\x00", 1)[0]
+                .decode("latin-1")
+            )
+            if (
+                re.fullmatch(r"[A-Za-z_\x80-\xff][A-Za-z0-9_\\\x80-\xff]*", payload)
+                and payload.lower().lstrip("\\") == key
+            ):
+                return payload
+            i += 4 + ln
+            continue
+        i += 1
+    return None
+
+
+def _legacy_class_hint(stream: bytes, start: int, end: int) -> str | None:
+    """The class record of a legacy single-class file.
+
+    Older eval generations write the class descriptor as
+    ``[u16 len][0x60][identifier]`` immediately after the main blob; the
+    ``00 20``-tagged namespaced records the other hints read are absent.
+    """
+    i = start
+    while i + 4 <= end:
+        ln = int.from_bytes(stream[i : i + 2], "little")
+        if (
+            0 < ln < 256
+            and stream[i + 2 : i + 4] == b"\x00\x60"
+            and i + 4 + ln <= end
+        ):
+            payload = stream[i + 4 : i + 4 + ln].split(b"\x00", 1)[0]
+            try:
+                name = payload.decode("latin-1")
+            except UnicodeDecodeError:
+                name = ""
+            if re.fullmatch(r"[A-Za-z_\\][A-Za-z0-9_\\]*", name):
+                return name
+        i += 1
+    return None
+
+
 def _declared_class(r: dict) -> tuple[str, str | None] | None:
     """(class, parent) from an opcode-resolved wire's DECLARE_CLASS node.
 
@@ -126,7 +187,10 @@ def lift_file(
     # the 00447 generation's method descriptors carry method/param/local
     # names (not class records); other eval generations keep class groups
     disableRecClasses = data.startswith(b"<?php //00447")
-    classFile = os.path.basename(path).endswith((".class.php", ".class"))
+    _base = os.path.basename(path)
+    classFile = _base.endswith((".class.php", ".class")) or (
+        _base.startswith("class.") and _base.endswith(".php")
+    )
 
     if isProd:
         pr = prod_decode_file(path, chunk)
@@ -383,6 +447,7 @@ def lift_file(
                     r = der[0]
                 cm: dict = {
                     "isFn": True,
+                    "closure": True,
                     "cv": cv_names(r, "eval", []),
                 }
                 cctx = LiftContext.build(mainWire[off : off + size], r, cm)
@@ -418,6 +483,7 @@ def lift_file(
             rr = der[0] if der is not None else r
             cm: dict = {
                 "isFn": True,
+                "closure": True,
                 "cv": cv_names(rr, "eval", []),
                 "closure_at": nextOuterClosure,
             }
@@ -490,7 +556,7 @@ def lift_file(
                     parent = ps[0]
             if cls is not None:
                 # a parent recovered from the pool can be the class itself in
-                # a different case (Captcha extends whmcs\utility\captcha) —
+                # a different case (`Thing extends vendor\utility\thing`) —
                 # extending yourself is not allowed, fall back to a base
                 if parent is not None and parent.lower().lstrip(
                     "\\"
@@ -621,8 +687,57 @@ def lift_file(
                 ):
                     mainCls = cand
         mainParent = mainDecl[1] if mainDecl else None
+        if mainParent is not None:
+            # DECLARE_CLASS can carry a lowercased parent (`Vendor\Module` ->
+            # `vendor\module`) even though the tail class record preserves the
+            # source casing.  Match it case-insensitively against the
+            # descriptor names and take the recorded spelling.
+            _pkey = mainParent.lower().lstrip("\\")
+            _pcand = None
+            for cand in class_like_names(
+                stream, boff + bsize,
+                subMeta[0][3] if subMeta else len(stream),
+            ):
+                if cand.lower().lstrip("\\") == _pkey:
+                    _pcand = cand
+                    break
+            if _pcand is None:
+                _pcand = _descriptor_case_name(
+                    stream, boff + bsize, len(stream), mainParent
+                )
+            if _pcand is not None:
+                mainParent = _pcand
         if mainCls is None and mainDecl:
             mainCls = mainDecl[0]
+        if (
+            mainCls is None
+            and subMeta
+            and fn_name_of(subMeta[0][0]) == "__construct"
+        ):
+            mainCls = _legacy_class_hint(
+                stream, boff + bsize, subMeta[0][3] - 4
+            )
+        if mainCls is None and classFile:
+            # a lowercase legacy class name (call_file, astinfo) is not in
+            # the capitalized rec heuristic; if no sub descriptor carries a
+            # capitalized class record, derive it from the class-file name
+            hasCap = any(
+                s[:1].isupper()
+                and s.lower() != s
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", s)
+                for _r, _rec, _wb, _off, _seeds in subMeta
+                for s in _rec
+            )
+            if not hasCap:
+                base = _base
+                if base.endswith(".class.php"):
+                    base = base[:-10]
+                elif base.endswith(".php"):
+                    base = base[:-4]
+                if base.startswith("class."):
+                    base = base[6:]
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", base):
+                    mainCls = base
         if mainCls is not None and mainDecl is None and mainR["thr"] <= 1:
             # a trivial main component whose filename hint matches a
             # sub-function leaf is a function file, not a class: emit its

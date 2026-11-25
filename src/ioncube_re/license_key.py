@@ -136,7 +136,7 @@ def extract_license_key(
     Runs ``php`` on a temporary harness that includes ``encoded``, waits for
     the loader to finish, then reads the mask from the loader's .bss.
     ``bootstrap`` is an optional plain- or encoded PHP file required before
-    the target (e.g. the base FPDF class a report class extends).
+    the target (e.g. a vendor-supplied base class the target extends).
     The encoded file's top-level executes (see the module warning).
     """
     if not os.path.isfile(encoded):

@@ -190,7 +190,10 @@ def prod_blob_locate(stream: bytes) -> tuple[int, int, bytes, str] | None:
         and stream[0x4C:0x50] == sig
     ):
         return 0x4C, size, stream[0x4C : 0x4C + size], "conv"
-    lim = min(len(stream), 0x400)
+    # large view streams carry a descriptor/string prefix before the blob;
+    # the signature can sit well past the conventional 0x4c window (the
+    # one observed large view stream puts it at 0x64e), so scan the whole stream
+    lim = len(stream)
     for i in range(0, lim - 3):
         if stream[i : i + 4] == sig and i + size <= len(stream):
             return i, size, stream[i : i + size], "sig"

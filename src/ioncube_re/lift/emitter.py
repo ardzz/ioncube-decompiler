@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from . import handlers  # noqa: F401 — imports register the opcode families
 from . import loops, structurer
+from .cleanup import drop_dead_pure_temps
 from .model import LiftContext
 from .registry import HANDLERS
 
@@ -26,7 +27,7 @@ def walk_component(ctx: LiftContext) -> str:
             f"/* {ctx.thr} nodes: {ctx.emitted} emitted, {ctx.bookkept} "
             f"bookkeeping/param, {ctx.masked} masked, {ctx.unknown} unknown */"
         )
-    return "".join(ctx.out)
+    return drop_dead_pure_temps("".join(ctx.out))
 
 
 def emit_region(ctx: LiftContext, i: int, end: int) -> None:

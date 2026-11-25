@@ -41,15 +41,19 @@ def php_quote(s: bytes) -> str:
 def zval_php(z: dict, idx: int) -> str:
     """A zval as a PHP expression (icl_zval_php port + interned resolution)."""
     raw = z.get("str")
-    if raw is not None and raw[:1] == b"\x81" and b"@:" in raw:
+    if raw is not None and raw[:2] == b"\x81@" and b"@" in raw:
         # a serialized constant-fetch record: either a plain namespaced
         # constant (`@:65:...s<n>'Ns\NAME`) or a class constant
-        # (`@:64:...s<n>'Cls` ... `s<n>'NAME`, class-scope `self` included)
+        # (`@:64:...s<n>'Cls` ... `s<n>'NAME`, class-scope `self` included).
+        # The 00442 generation uses `@<n>:<n>:...` field numbers instead
+        # of the bare `@:` prefix.
         names = []
         for m in re.finditer(rb"s(\d+)'", raw):
             ln = int(m.group(1))
             names.append(raw[m.end() : m.end() + ln].decode("latin-1"))
-        if names:
+        if names and all(
+            re.fullmatch(r"[A-Za-z_\\][A-Za-z0-9_\\]*", nm) for nm in names
+        ):
             if names[0] == "self":
                 return f"self::{names[-1]}"
             if len(names) == 1:

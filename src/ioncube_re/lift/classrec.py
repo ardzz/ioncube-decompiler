@@ -167,6 +167,32 @@ def class_tail(
                 j += vln + 1
             if ok and all(re.match(r"^[A-Z_][A-Z0-9_]*$", nm) for nm, _ in cl):
                 consts = cl
+    if not consts:
+        # 00442 constants: [u24 namelen][0x60][NAME][u24 vlen]
+        # [20 81][serialized scalar], each preceded by an 8-byte header;
+        # scan the tail for the name/value records instead of the fixed
+        # count table layout used by the older generations.
+        seen = set()
+        for k in range(start, max(start, end - 8)):
+            ln = int.from_bytes(s[k : k + 3], "little")
+            if not (1 <= ln <= 64) or k + 4 + ln + 3 > end:
+                continue
+            if s[k + 3] != 0x60:
+                continue
+            nm = s[k + 4 : k + 4 + ln].decode("latin-1")
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", nm) or nm in seen:
+                continue
+            j = k + 4 + ln
+            vln = int.from_bytes(s[j : j + 3], "little")
+            if not (0 < vln <= 256) or j + 3 + vln > end:
+                continue
+            payload = s[j + 3 : j + 3 + vln]
+            mv = re.search(rb"[sdinU]", payload)
+            if mv is None:
+                continue
+            val = _scalar_value(payload[mv.start() :])
+            seen.add(nm)
+            consts.append((nm, val))
     return {"props": props, "consts": consts}
 
 

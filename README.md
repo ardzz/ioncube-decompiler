@@ -105,7 +105,7 @@ and `decode_mykey()` / `mask_from_mykey()` document the property decoding.
 
 If the encoded file needs a base class or other dependency at load time,
 pass `--bootstrap PHP_FILE`; the harness requires it before the target
-(file example: a report class extending the vendor FPDF class):
+(for example, a class extending a vendor-supplied base class):
 
 Requirements and limits:
 

@@ -215,9 +215,10 @@ class LiftContext:
                 return False
         elif op == 137:
             # OP_DATA: the assign's value operand is read through the
-            # unregistered data node (ASSIGN_DIM..OP_DATA pair). Inline when
-            # the def range holds nothing but the pair partner.
-            if uses:
+            # data node (ASSIGN_DIM..OP_DATA pair).  Its own registered use
+            # is allowed; inline when the def range holds nothing but the
+            # pair partner.
+            if uses and uses != [use_node]:
                 return False
             d = self.tempDef[slot]
             if d >= use_node:
@@ -258,6 +259,26 @@ class LiftContext:
             slot = n.res // 16
             uses = self.tempUses.get(slot, [])
             forward = bool(uses) and min(uses) < i
+            branch_chain = (
+                bool(uses)
+                and all(self.op.get(u) in (43, 44, 46, 47) for u in uses)
+                and any(self.op.get(u) in (46, 47) for u in uses)
+                and all(u > i for u in uses)
+            )
+            switch_chain = (
+                bool(uses)
+                and all(self.op.get(u) in (48, 185, 186, 194) for u in uses)
+                and any(self.op.get(u) in (185, 186) for u in uses)
+                and all(u > i for u in uses)
+            )
+            if branch_chain or switch_chain:
+                # a short-circuit condition temp or a switch subject: every
+                # reader is machinery the merge/switch emitter consumes into
+                # the emitted expression; a standalone `$Tn = ...;` would be
+                # dead.
+                self.tempExpr[slot] = expr
+                self.emitted += 1
+                return i + 1
             if len(uses) > 1 or forward:
                 # a multi-read temp keeps a named definition statement: the
                 # references render the same $Tn/$Vn and every read sees the
@@ -329,6 +350,12 @@ _PLUMBING = frozenset(
         # between the DECLARE_LAMBDA def and its ASSIGN use
         180,
         182,
+        # HANDLE_EXCEPTION after a call in a try region: the encoded call
+        # result is carried through it (res = op1); no source statement
+        149,
+        # FREE / FREE_OP: statement glue between a call def and its reader
+        70,
+        127,
     }
 )
 _PURE = frozenset(
@@ -349,6 +376,7 @@ _PURE = frozenset(
         138,
         148,
         154,
+        157,
         169,
         170,
         188,

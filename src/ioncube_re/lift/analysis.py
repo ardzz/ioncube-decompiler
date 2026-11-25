@@ -30,14 +30,22 @@ _SKIPUSE = frozenset(
         70,
         109,
         124,
-        137,
+        # FREE / FREE_OP (70/127) are lifetime bookkeeping, not source
+        # reads: counting the switch subject's FREE as a use made its temp
+        # statement survive while the switch emitter inlined the subject
+        # ($T31 = $_REQUEST['command']; switch ($_REQUEST['command'])).
+        127,
+        # OP_DATA (137) registers its operand as a real use: the value is
+        # read only through this node (ASSIGN_OBJ..OP_DATA), so skipping it
+        # made call collectors think the result was unused and emit both a
+        # temp statement and the inlined assignment.
         # BIND_LEXICAL + the ktab-garbled 182 variant: the
         # DECLARE_LAMBDA look-ahead consumes them, not a read
         180,
         182,
     }
 )
-_CALLDEF = frozenset({60, 68, 129, 130, 131})
+_CALLDEF = frozenset({60, 68, 98, 129, 130, 131, 29, 30})
 _SEND = (65, 116, 117, 66, 67, 106, 50, 165, 119, 120, 183)
 _DO = (60, 129, 130, 131)
 _INIT = (59, 61, 69, 112, 113, 118, 128)
@@ -200,6 +208,18 @@ def _alias_149(ctx) -> None:
                 ctx.op[n.i] = 112  # camelCase + junk k0 op1: the $this marker
             continue
 
+        # plain jump: op1 is the 1-based target, with no res/op2 payload.
+        # The nosig alias replaces the skipped branch of a ternary.
+        if (
+            e1 is not None
+            and e1.kind == 0
+            and 0 < e1.raw <= ctx.thr
+            and _unused(n, "op2")
+            and _unused(n, "res")
+        ):
+            ctx.op[n.i] = 42
+            continue
+
         # SEND_VAL_EX: op1 = the value, op2 = the k0 arg index 1..15, res
         # mirrors it — a lost call argument (EmailsController n121)
         if (
@@ -327,12 +347,11 @@ def _calibrate_jumps(ctx) -> None:
 def _shift_var_reads(ctx) -> None:
     """Normalize VAR reads of call/NEW results across encoder generations.
 
-    One generation encodes a VAR read 4 slots above the producer's res slot
-    (V26 = DO_FCALL res; ASSIGN op2 = V30).  Another writes the result 6
-    slots above the VAR slot read by the immediately following ASSIGN
-    (DO res slot 15, ASSIGN op2 slot 9).  Both are normalized to the
-    producer's slot so the temp def/use analysis and the expression
-    inlining line up.
+    The producer/read VAR slots are rotated differently per call site
+    (+2/+3/+4/+5/+6 observed): the assignment after a call or constructor
+    reads a slot that is not the producer's result slot.  Normalize the
+    read to the producer's slot when the call/NEW is immediately before
+    the read on the same source line, plus the fixed +4/+6 generations.
     """
     defs: dict[int, int] = {}
     for n in ctx.nodes:
@@ -345,16 +364,48 @@ def _shift_var_reads(ctx) -> None:
             if not e or not (e.kind & 4):
                 continue  # VAR reads only
             slot = getattr(n, wname) // 16
+            # A call/NEW result immediately before the read can be encoded
+            # with the read at an arbitrary rotated VAR slot (offers: DO res
+            # V7, ASSIGN reads V4; VPN: NEW res V6, the ctor DO has no res,
+            # ASSIGN reads V1).  Same source line => the read is the
+            # producer.
+            p = n.i - 1
+            if p >= 0 and ctx.op[p] in _DO and _unused(ctx.nodes[p], "res"):
+                p -= 1
+            if p >= 0 and ctx.op.get(p) in _CALLDEF:
+                pn = ctx.nodes[p]
+                pe = pn.ent.get("res")
+                if pe is not None and (pe.kind & 6):
+                    pslot = pn.res // 16
+                    if (
+                        pslot != slot
+                        and getattr(n, "lineno", 0)
+                        == getattr(pn, "lineno", -1)
+                    ):
+                        ctx.effSlot[f"{n.i}:{wname}"] = pslot
+                        continue
             if n.i > 0 and ctx.op[n.i - 1] in _DO:
                 # this encoder generation writes the call result 6 slots
                 # above the VAR slot the immediately following ASSIGN reads
                 # (DO res slot 15, ASSIGN op2 slot 9); normalize the read to
                 # the producer so the call inlines into the assignment.
-                p = ctx.nodes[n.i - 1]
-                pe = p.ent.get("res")
+                pn = ctx.nodes[n.i - 1]
+                pe = pn.ent.get("res")
                 if pe is not None and (pe.kind & 6):
-                    pslot = p.res // 16
+                    pslot = pn.res // 16
                     if pslot == slot + 6:
+                        ctx.effSlot[f"{n.i}:{wname}"] = pslot
+                        continue
+                    # Another generation writes the value 2 slots above
+                    # (one observed closure: DO res V4, foreach-body ASSIGN
+                    # reads V2 while V4 is otherwise unused).  The call and the
+                    # assignment share the source line.
+                    if (
+                        pslot == slot + 2
+                        and ctx.op[n.i] == 22
+                        and getattr(n, "lineno", 0)
+                        == getattr(pn, "lineno", -1)
+                    ):
                         ctx.effSlot[f"{n.i}:{wname}"] = pslot
                         continue
             if slot in defs and defs[slot] < n.i:

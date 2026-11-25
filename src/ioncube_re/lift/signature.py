@@ -172,6 +172,14 @@ def cv_names(
         # header arg-count misses a trailing variadic — take the max
         numArgs = max(u32(r["hdr"], 0x14), len(arg_names(r)))
         base = 1 + numArgs if r["fnrec"] is not None else 0
+        # the pool can carry the component docblock between the function
+        # name/arg block and the CV-name block (one observed method:
+        # [method][docblock][return][formData]...); skip leading
+        # non-identifier entries so the names land on slots 0..N
+        while base < len(entries) and not re.match(
+            r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", entries[base]
+        ):
+            base += 1
         for k in range(numCV):
             if base + k < len(entries) and re.match(
                 r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", entries[base + k]

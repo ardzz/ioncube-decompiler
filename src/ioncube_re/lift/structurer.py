@@ -16,7 +16,7 @@ from .operand import bare, class_ref, unwrap, zval_name
 # `$_SERVER['REQUEST_METHOD'] == 'POST' && empty($_POST)`)
 _SC_PURE = (
     frozenset(range(1, 22))
-    | {31, 51, 52, 53, 114, 115, 121, 123, 138, 148, 154, 169, 170, 188, 191}
+    | {31, 51, 52, 53, 114, 115, 121, 123, 138, 148, 154, 157, 169, 170, 188, 191}
     | frozenset(range(80, 99))
 )
 
@@ -335,6 +335,132 @@ def _ternary_chain(ctx: LiftContext, i: int, end: int) -> tuple[int, int] | None
     return outSlot, k
 
 
+def _pure_region(ctx: LiftContext, lo: int, hi: int) -> bool:
+    """[lo, hi) holds only pure expression defs (no statements)."""
+    for k in range(lo, hi):
+        o = ctx.op[k]
+        if o in _PLUMBING:
+            continue
+        ne = ctx.nodes[k].ent.get("res")
+        if o not in _PURE or not ne or not (ne.kind & 6):
+            return False
+    return True
+
+
+def _ternary_plan(
+    ctx: LiftContext, j: int, limit: int, cond_start: int | None = None
+) -> tuple[int, dict] | None:
+    """Plan a QM_ASSIGN ternary, including the 0044b/00442 shapes where the
+    condition is a multi-node `isset($a['k'])` def and the then-arm is a
+    multi-node fetch.  Validation only; :func:`_ternary_exec` emits."""
+    t = ctx.jt.get(j)
+    if t is None or t <= j + 1 or t >= limit:
+        return None
+    if cond_start is not None:
+        if cond_start >= j or not _pure_region(ctx, cond_start, j):
+            return None
+    if ctx.op[t - 1] != 42:
+        return None
+    merge = ctx.jt.get(t - 1)
+    if merge is None or merge <= t or merge > limit:
+        return None
+    slot = _pure_arm(ctx, j + 1, t - 1)
+    if slot is None:
+        return None
+    if any(u < merge for u in ctx.tempUses.get(slot, [])):
+        return None
+    false = None
+    for k in range(t, merge):
+        if ctx.op[k] not in (43, 44) or ctx.jt.get(k) is None:
+            continue
+        if not _pure_region(ctx, t, k):
+            continue
+        inner = _ternary_plan(ctx, k, merge, cond_start=t)
+        if inner is None:
+            continue
+        islot, iplan = inner
+        cur = islot
+        kk = iplan["merge"]
+        ok = True
+        while kk < merge:
+            q = ctx.nodes[kk]
+            e = q.ent.get("op1")
+            res = q.ent.get("res")
+            if (
+                ctx.op[kk] != 31
+                or e is None
+                or res is None
+                or not (res.kind & 6)
+                or (q.op1 // 16) != cur
+            ):
+                ok = False
+                break
+            cur = q.res // 16
+            kk += 1
+        if ok and kk == merge and cur == slot:
+            false = ("nested", inner)
+            break
+    if false is None:
+        fslot = _pure_arm(ctx, t, merge)
+        if fslot != slot:
+            return None
+        false = ("arm",)
+    return slot, {
+        "j": j,
+        "cond_start": cond_start,
+        "t": t,
+        "merge": merge,
+        "true": (j + 1, t - 1, slot),
+        "false": false,
+    }
+
+
+def _ternary_exec(ctx: LiftContext, plan: dict) -> tuple[int, int] | None:
+    from .emitter import emit_region
+
+    j = plan["j"]
+    t = plan["t"]
+    merge = plan["merge"]
+    slot = plan["true"][2]
+    if plan["cond_start"] is not None:
+        emit_region(ctx, plan["cond_start"], j)
+    cond = unwrap(
+        ctx.render.ch(ctx.condOv.get(j, ctx.render.ex_op1(ctx.nodes[j])))
+    )
+    if cond is None:
+        return None
+    if ctx.op[j] in (44, 47):
+        cond = "!(" + cond + ")"
+    ts, te, _ = plan["true"]
+    emit_region(ctx, ts, te)
+    a = ctx.tempExpr.get(slot)
+    false = plan["false"]
+    if false[0] == "nested":
+        iplan = false[1][1]
+        m = _ternary_exec(ctx, iplan)
+        if m is None:
+            return None
+        islot, iend = m
+        b = ctx.tempExpr.get(islot)
+        emit_region(ctx, iend, merge)
+        if slot not in ctx.tempExpr:
+            ctx.tempExpr[slot] = b
+    else:
+        emit_region(ctx, t, merge)
+        b = ctx.tempExpr.get(slot)
+    if a is None or b is None:
+        return None
+    ctx.tempExpr[slot] = (
+        f"({_ternary_paren(cond)} ? {_ternary_paren(a)} : "
+        f"{_ternary_paren(b)})"
+    )
+    ctx.tempDef[slot] = merge - 1
+    ctx.tempUses[slot] = [u for u in ctx.tempUses.get(slot, []) if u >= merge]
+    for kk in range(j, merge):
+        ctx.bk(kk)
+    return slot, merge
+
+
 def _sc_pure_region(ctx: LiftContext, lo: int, hi: int) -> bool:
     """[lo, hi) holds only expression defs for a short-circuit merge:
     pure defs (op in _SC_PURE with a res temp), the call machinery
@@ -378,21 +504,49 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
     if op in (46, 47) and t > i + 1 and n.ent.get("op1") and (n.ent["op1"].kind & 6):
         slot = n.op1 // 16
         left = ctx.tempExpr.get(slot)
+        # The branch's result temp may be a different slot than its input
+        # (JMPNZ_EX V251 -> T252): the OR/AND value is in n.res, and the
+        # right operand writes that slot, not the input.
+        re_ = n.ent.get("res")
+        res_slot = n.res // 16 if re_ is not None and (re_.kind & 6) else slot
         if left is not None and _sc_pure_region(ctx, i + 1, t):
-            emit_region(ctx, i + 1, t)  # temp defs only (guaranteed)
-            if slot in ctx.tempExpr and ctx.tempExpr[slot] != left:
-                ctx.tempExpr[slot] = (
+            # The chain writes the same condition temp at every level; its
+            # registered uses are all the JMPZ_EX nodes.  While rendering
+            # the right operand, expose only the next consumer (t) so the
+            # temp defs inline instead of staging `$T = ...` statements.
+            saved = ctx.tempUses.get(slot, [])
+            saved_res = ctx.tempUses.get(res_slot, []) if res_slot != slot else saved
+            ctx.tempUses[slot] = [t]
+            if res_slot != slot:
+                ctx.tempUses[res_slot] = [t]
+            try:
+                emit_region(ctx, i + 1, t)  # temp defs only (guaranteed)
+            finally:
+                ctx.tempUses[slot] = [u for u in saved if u != i]
+                if res_slot != slot:
+                    ctx.tempUses[res_slot] = [u for u in saved_res if u != i]
+            right = ctx.tempExpr.get(res_slot)
+            if right is not None and right != left:
+                expr = (
                     "("
                     + unwrap(left)
                     + " "
                     + ("&&" if op == 46 else "||")
                     + " "
-                    + unwrap(ctx.tempExpr[slot])
+                    + unwrap(right)
                     + ")"
                 )
+                ctx.tempExpr[res_slot] = expr
+                ctx.tempDef[res_slot] = i
                 if i in ctx.jt and ctx.jt[i] > 0:
-                    ctx.condOv[ctx.jt[i]] = ctx.tempExpr[slot]
-                ctx.tempUses[slot] = [u for u in ctx.tempUses.get(slot, []) if u != i]
+                    ctx.condOv[ctx.jt[i]] = expr
+                ctx.tempUses[res_slot] = [
+                    u for u in ctx.tempUses.get(res_slot, []) if u != i
+                ]
+                if res_slot != slot:
+                    ctx.tempUses[slot] = [
+                        u for u in ctx.tempUses.get(slot, []) if u != i
+                    ]
                 ctx.bk(i)
                 return t
     condTxt = unwrap(ctx.render.ch(cond))
@@ -456,12 +610,47 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
             ctx.bk(i)
             ctx.bk(t - 1)
             return skip
+        tp = _ternary_plan(ctx, i, end)
+        if tp is not None:
+            m = _ternary_exec(ctx, tp[1])
+            if m is not None:
+                return m[1]
     else:
         # nested ternary (`a ? b : c ? d : e`): the else arm is the next
         # level's JMPZ, not an else-jump — try the chain reconstruction
         m = _ternary_chain(ctx, i, end)
         if m is not None:
             return m[1]
+        tp = _ternary_plan(ctx, i, end)
+        if tp is not None:
+            m = _ternary_exec(ctx, tp[1])
+            if m is not None:
+                return m[1]
+    # A closure body's if/else where the then arm ends in RETURN has no
+    # else-jump in the wire (the return makes it dead).  Restore the
+    # explicit else: `if (c) { return A; } else { return B; }` reads better
+    # than a bare fall-through return, and is the source shape for the
+    # encoder's no-JMP lowering.
+    if (
+        not hasElse
+        and not isCase
+        and ctx.meta.get("closure")
+        and t > i + 1
+        and t < end
+        and ctx.op[t - 1] == 62
+    ):
+        ctx.line(n)
+        ctx.w(f"if ({condTxt}) {{")
+        ctx.idp += 1
+        emit_region(ctx, i + 1, t)
+        ctx.idp -= 1
+        ctx.w("} else {")
+        ctx.idp += 1
+        emit_region(ctx, t, end)
+        ctx.idp -= 1
+        ctx.w("}")
+        ctx.emitted += 1
+        return end
     ctx.line(n)
     ctx.w(f"if ({condTxt}) {{")
     cont = t

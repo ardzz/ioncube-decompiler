@@ -224,10 +224,24 @@ class LiftContext:
             if d >= use_node:
                 return False
             for i in range(d + 1, use_node):
-                if i != use_node - 1 and (
-                    self.op[i] not in _PLUMBING and self.op[i] not in _PURE
+                if i == use_node - 1:
+                    continue
+                opi = self.op[i]
+                if opi in _PLUMBING or opi in _PURE:
+                    continue
+                if opi == 22 and self.meta.get("exprAssign"):
+                    # an assignment expression inside a short-circuit
+                    # operand: its value is already in tempExpr
+                    continue
+                # a branch consumed by an expression folder (a folded
+                # ternary/if merge) carries its control flow into the
+                # expression at the use site and no longer blocks the inline;
+                # a JMP to the very next node is a no-op
+                if opi in (42, 43, 44, 46, 47) and (
+                    i in self.acct or (opi == 42 and self.jt.get(i) == i + 1)
                 ):
-                    return False
+                    continue
+                return False
             return True
         elif len(uses) != 1 or uses[0] != use_node:
             return False
@@ -239,8 +253,16 @@ class LiftContext:
             # node instead (pendingStmt)
             return False
         for i in range(d + 1, use_node):
-            if self.op[i] not in _PLUMBING and self.op[i] not in _PURE:
-                return False
+            opi = self.op[i]
+            if opi in _PLUMBING or opi in _PURE:
+                continue
+            if opi == 22 and self.meta.get("exprAssign"):
+                continue
+            if opi in (42, 43, 44, 46, 47) and (
+                i in self.acct or (opi == 42 and self.jt.get(i) == i + 1)
+            ):
+                continue
+            return False
         return True
 
     def temp_name(self, slot: int, kind: int) -> str:
@@ -301,6 +323,14 @@ class LiftContext:
                 # exactly that null — render order matches execution order
                 self.line(n)
                 self.w(self.temp_name(slot, e.kind) + " = " + unwrap(expr) + ";")
+            elif uses:
+                # a single later read that cannot inline (a non-pure write
+                # sits between the def and the use) still needs the value:
+                # keep the named temp so the reader's $Tn is defined
+                self.tempExpr[slot] = expr
+                if not self.inlinable(slot, uses[0]):
+                    self.line(n)
+                    self.w(self.temp_name(slot, e.kind) + " = " + unwrap(expr) + ";")
             self.tempExpr[slot] = expr
             self.emitted += 1
             return i + 1
@@ -366,6 +396,9 @@ _PLUMBING = frozenset(
         # HANDLE_EXCEPTION after a call in a try region: the encoded call
         # result is carried through it (res = op1); no source statement
         149,
+        # SEPARATE: an in-place copy-on-write identity — the producer's
+        # temp already carries the expression its reader inlines
+        156,
         # FREE / FREE_OP: statement glue between a call def and its reader
         70,
         127,
@@ -378,6 +411,9 @@ _PURE = frozenset(
         51,
         52,
         53,
+        54,
+        55,
+        56,
         99,
         71,
         72,
@@ -385,6 +421,7 @@ _PURE = frozenset(
         114,
         115,
         121,
+        122,
         123,
         138,
         148,
@@ -392,8 +429,13 @@ _PURE = frozenset(
         157,
         169,
         170,
+        179,
+        187,
         188,
+        189,
+        190,
         191,
+        192,
     ]
     + list(range(80, 99))
     + list(range(173, 179))

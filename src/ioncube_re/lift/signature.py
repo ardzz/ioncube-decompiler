@@ -113,16 +113,27 @@ def pool_names(r: dict) -> list[str]:
     return strs
 
 
-def arg_specs(r: dict) -> tuple[list[tuple[str, str]], str | None]:
-    """[(param name, rendered type), ...] and the rendered return type.
+def fn_returns_ref(r: dict) -> bool:
+    """fn_flags 0x1000 = by-reference return (`function &f()`).
+
+    Verified against the reference corpus: the single `function &`
+    component (0x2021001) is the only one in its file carrying the bit;
+    its sibling methods with the same visibility carry 0x2020001."""
+    return bool(r.get("fn", 0) & 0x1000)
+
+
+def arg_specs(r: dict) -> tuple[list[tuple[str, str, bool]], str | None]:
+    """[(param name, rendered type, by_ref), ...] and the return type.
 
     The pre-node records carry (offset,len) name pairs plus the zend type
     mask (zctrl); the fn&0x2000 slot is the name-less return-type record
     (validated on all 6 ground-truth typed components: hello, hi, join2,
-    Dog::__construct, Dog::label, Animal::label)."""
+    Dog::__construct, Dog::label, Animal::label).  zctrl bit 0x2000000
+    marks a by-reference parameter (`&$x`); verified on the `fastpass_*`
+    methods against the reference."""
     fn = r["fn"]
     ret = None
-    params: list[tuple[str, str]] = []
+    params: list[tuple[str, str, bool]] = []
     pool = r["pool"]
     for idx, p in enumerate(r["pre"]):
         ctrl = p["ctrl"]
@@ -145,7 +156,7 @@ def arg_specs(r: dict) -> tuple[list[tuple[str, str]], str | None]:
             if 0 < ln < 64 and off + ln <= len(pool)
             else None
         )
-        params.append((nm, ty))
+        params.append((nm, ty, bool(ctrl & 0x2000000)))
     return params, ret
 
 
@@ -159,6 +170,21 @@ def arg_names(r: dict) -> list[str]:
         if 0 < ln < 64 and off >= 2 and off + ln <= len(pool):
             out.append(pool[off : off + ln].decode("latin-1"))
     return out
+
+
+def _strip_rec_fn(rec_strings: list[str], r: dict) -> list[str]:
+    """The descriptor record's trailing entry is the component name for
+    methods/functions (`[cvnames..., fnName]`) but not for closures, whose
+    record is `[argNames..., cvNames...]` with no name entry (the name
+    lives in the pool as `...\\{closure}`).  Only drop the last entry when
+    it actually is the component's leaf name — an unconditional pop ate
+    the final closure local (`type` / `default` in HttpsSetup)."""
+    cand = list(rec_strings)
+    fnm = fn_name_of(r)
+    leaf = fnm.rsplit("\\", 1)[-1] if fnm else None
+    if cand and leaf is not None and cand[-1] == leaf:
+        cand.pop()
+    return cand
 
 
 def cv_names(
@@ -197,8 +223,7 @@ def cv_names(
         # Fill only unmapped slots, skipping names already assigned to a
         # slot (the repeated arg block).
         if rec_strings:
-            cand = list(rec_strings)
-            cand.pop()
+            cand = _strip_rec_fn(rec_strings, r)
             cand = [
                 s
                 for s in cand
@@ -211,8 +236,7 @@ def cv_names(
                 if k not in names and rem:
                     names[k] = rem.pop(0)
     if not names and rec_strings:
-        cand = list(rec_strings)
-        cand.pop()  # last = fn name
+        cand = _strip_rec_fn(rec_strings, r)
         cand = [s for s in cand if not (s[:1].isupper() and s.lower() != s)]
         for k in range(min(numCV, len(cand))):
             if re.match(r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", cand[k]):
@@ -283,8 +307,7 @@ def cv_names(
         if names:
             return names
     if not names and rec_strings:
-        cand = list(rec_strings)
-        cand.pop()  # last = fn name
+        cand = _strip_rec_fn(rec_strings, r)
         cand = [s for s in cand if not (s[:1].isupper() and s.lower() != s)]
         for k in range(min(numCV, len(cand))):
             if re.match(r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", cand[k]):
@@ -299,8 +322,9 @@ def param_list(ctx) -> list[str]:
     plain rendering at their index."""
     specs, _ = arg_specs(ctx.r)
     params = []
-    arg_names_list = [nm for nm, _ in specs]
-    arg_types = [ty for _, ty in specs]
+    arg_names_list = [nm for nm, _, _ in specs]
+    arg_types = [ty for _, ty, _ in specs]
+    arg_refs = [br for _, _, br in specs]
     promote = ctx.meta.get("promote") or {}
     for i in range(ctx.thr):
         op = ctx.op[i]
@@ -327,7 +351,8 @@ def param_list(ctx) -> list[str]:
                 # prefix replaces the wire-derived type
                 params.append(promote[k] + " $" + nm)
             else:
-                params.append(("" if not ty else ty + " ") + prefix + "$" + nm)
+                br = "&" if k < len(arg_refs) and arg_refs[k] else ""
+                params.append(("" if not ty else ty + " ") + br + prefix + "$" + nm)
         elif op is not None and op not in (0, 124, 101):
             break  # first real statement ends the params
     return params
@@ -338,6 +363,7 @@ __all__ = [
     "arg_specs",
     "cv_names",
     "fn_name_of",
+    "fn_returns_ref",
     "max_cv",
     "param_list",
     "pool_names",

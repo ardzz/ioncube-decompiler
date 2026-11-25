@@ -12,8 +12,8 @@ bottom-tested loop with side-effect conditions can take without a goto.
 
 from __future__ import annotations
 
-from .model import LoopInfo, LiftContext
-from .operand import unwrap
+from .model import _PLUMBING, LoopInfo, LiftContext
+from .operand import prefix_operand, unwrap
 
 
 def bottom_tested_while(ctx: LiftContext, i: int, t: int, end: int) -> int | None:
@@ -62,7 +62,13 @@ def bottom_tested_while(ctx: LiftContext, i: int, t: int, end: int) -> int | Non
         # prime the condition temps first (the cmp def has not been walked
         # at header-render time; a pure cond emits nothing here)
         emit_region(ctx, t, j)
-        condT = unwrap(ctx.render.ch(ctx.render.ex_op1(ctx.nodes[j])))
+        # a folded short-circuit condition lives in condOv (its node's
+        # operand temp does not inline across the right operand's writes)
+        condT = unwrap(
+            ctx.render.ch(
+                ctx.condOv.get(j, ctx.render.ex_op1(ctx.nodes[j]))
+            )
+        )
         initV = ctx.render.assigned_value(initN, "op2")
         ctx.line(ctx.nodes[i])
         ctx.w(
@@ -91,7 +97,7 @@ def bottom_tested_while(ctx: LiftContext, i: int, t: int, end: int) -> int | Non
     # ASSIGN to a CV, the while-condition renders that CV (the ASSIGN stores the
     # target; the inlined value would re-call fetch())
     n_j = ctx.nodes[j]
-    cond = ctx.render.ex_op1(n_j)
+    cond = ctx.condOv.get(j, ctx.render.ex_op1(n_j))
     eo = n_j.ent.get("op1")
     if eo and (eo.kind & 6):
         slot = n_j.op1 // 16
@@ -138,27 +144,88 @@ def do_while_at(ctx: LiftContext, i: int, end: int) -> int | None:
     j = ctx.dw_edges.get(i)
     if j is None or j > end:
         return None
-    # the condition defs sit between the body and the back-edge conditional
-    c = j - 1
+    # the body is emitted by re-entering the walker at this same node: mark
+    # it while rendering so the nested emit_node falls through to the node
+    # handler instead of recursing into this emitter
+    active = ctx.meta.setdefault("doWhileActive", set())
+    if i in active:
+        return None
+    active.add(i)
+    try:
+        return _emit_do_while(ctx, i, end, j)
+    finally:
+        active.discard(i)
+
+
+def _emit_do_while(ctx: LiftContext, i: int, end: int, j: int) -> int | None:
+    from .emitter import emit_region
+    # the condition defs sit between the body and the back-edge conditional.
+    # A short-circuit condition (`$str == "" && $count++ < 5`) is a run of
+    # pure defs whose temps feed each other and the branch temp; walking
+    # back through that dependency suffix keeps the whole condition out of
+    # the body (the last write alone left the IS_EQUAL/JMPZ_EX chain inside
+    # `do { ... }`, duplicating the condition and leaving $T read-before-def)
     n_j = ctx.nodes[j]
     eo = n_j.ent.get("op1")
+    c = j - 1
     if eo and (eo.kind & 6):
         es = ctx.effSlot.get(f"{j}:op1")
         slot = es if es is not None else n_j.op1 // 16
-        d = ctx.tempDef.get(slot)
-        if d is not None and i <= d < j:
-            c = d
-    if c <= i:
+        deps = {slot}
+        k = j - 1
+        while k >= i:
+            q = ctx.nodes[k]
+            re_ = q.ent.get("res")
+            if re_ is not None and (re_.kind & 6) and (q.res // 16) in deps:
+                for w in ("op1", "op2"):
+                    qe = q.ent.get(w)
+                    if qe is not None and (qe.kind & 6):
+                        deps.add(getattr(q, w) // 16)
+                k -= 1
+                continue
+            o = ctx.op.get(k)
+            # call-machinery glue of the condition (`substr(...) == '**'`):
+            # SENDs/CHECK/INIT feed the branch temp.  The DO is either the
+            # condition's call (res in deps, handled above) or the body's
+            # last statement — never cross it; stop after the condition's
+            # INIT so the body's call run stays in the body.
+            if o in (60, 129, 130, 131) or o not in _PLUMBING:
+                break
+            for w in ("op1", "op2"):
+                qe = q.ent.get(w)
+                if qe is not None and (qe.kind & 6):
+                    deps.add(getattr(q, w) // 16)
+            k -= 1
+            if o in (59, 61, 69, 112, 113, 118, 128):
+                break
+        if k + 1 < j:
+            c = k + 1
+        else:
+            d = ctx.tempDef.get(slot)
+            if d is not None and i <= d < j:
+                c = d
+    if c < i:
         return None
+    # c == i is an empty body whose condition is the whole region down to
+    # the back edge (`do { } while (fgets($this->in) !== false);`) — the
+    # loop still runs the condition each iteration
     ctx.line(ctx.nodes[i])
     ctx.w("do {")
     ctx.idp += 1
-    emit_region(ctx, i, c)
-    emit_region(ctx, c, j)  # the condition defs (no output when pure)
+    # break targets the node after the back edge; continue re-runs the
+    # condition (the region after the body)
+    ctx.loop_stack.append(LoopInfo(frozenset({j + 1}), frozenset({c})))
+    try:
+        emit_region(ctx, i, c)
+        emit_region(ctx, c, j)  # the condition defs (no output when pure)
+    finally:
+        ctx.loop_stack.pop()
     ctx.idp -= 1
-    cond = unwrap(ctx.render.ch(ctx.render.ex_op1(n_j)))
+    cond = unwrap(
+        ctx.render.ch(ctx.condOv.get(j, ctx.render.ex_op1(n_j)))
+    )
     if ctx.op[j] == 43:  # JMPZ back edge: the loop repeats while !cond
-        cond = "!(" + cond + ")"
+        cond = "!" + prefix_operand(cond)
     ctx.w(f"}} while ({unwrap(cond)});")
     ctx.emitted += 1
     ctx.bk(j)

@@ -23,7 +23,14 @@ from ..container import (
 from ..crypto.layerb import EVAL_KEY, component_decrypt
 from ..stream import prod_decode_file, stream_of_file
 from ..wire import gt_check, gt_sections, parse_wire
-from .signature import arg_names, arg_specs, cv_names, fn_name_of, param_list
+from .signature import (
+    arg_names,
+    arg_specs,
+    cv_names,
+    fn_name_of,
+    fn_returns_ref,
+    param_list,
+)
 from .sources import best_pair, capture_pairs, m5_sample_dir, offline_parse
 from .wires import (
     class_like_names,
@@ -67,6 +74,50 @@ _PHP_RESERVED_FNS = frozenset(
     }
 )
 
+# PHP-8 attribute names that appear in eval descriptor records next to the
+# declared class/method name; they are not class names.
+_PHP_ATTRIBUTES = frozenset(
+    {
+        "AllowDynamicProperties",
+        "ReturnTypeWillChange",
+        "SensitiveParameter",
+        "Override",
+        "Deprecated",
+        "NoReturn",
+        "Attribute",
+    }
+)
+
+
+def _rec_class_name(s: str) -> bool:
+    return bool(
+        s
+        and s[:1].isupper()
+        and s.lower() != s
+        and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", s)
+    )
+
+
+def _ctor_class_rec(rec: list[str]) -> tuple[str | None, str | None]:
+    """The (class, parent) a constructor descriptor record names.
+
+    Constructor records carry the class name among parameter/local names
+    (`['request', 'requestParams', 'DphoneAppValidateParamsException',
+    'Exception', ...]`); PHP-8 attribute names are skipped first.  A parent
+    is only the name immediately following the class — a later capitalized
+    name is usually a parameter type (`__construct(FooRequest $request)`).
+    """
+    names = [s for s in rec if s not in _PHP_ATTRIBUTES]
+    caps = [s for s in names if _rec_class_name(s)]
+    if not caps:
+        return None, None
+    cls = caps[0]
+    ki = names.index(cls)
+    parent = None
+    if ki + 1 < len(names) and _rec_class_name(names[ki + 1]):
+        parent = names[ki + 1]
+    return cls, parent
+
 
 class PipelineError(Exception):
     pass
@@ -78,7 +129,7 @@ def _descriptor_case_name(
     """A descriptor record spelling of `name` with its original case.
 
     The DECLARE_CLASS parent can be lowercased (`vendor_helpers`,
-    `vendor\module`); the tail class records preserve the source spelling.
+    `vendor\\module`); the tail class records preserve the source spelling.
     Unlike :func:`class_like_names` this also matches un-namespaced names
     (`Vendor_Helpers` has no backslash).
     """
@@ -159,6 +210,118 @@ def _declared_class(r: dict) -> tuple[str, str | None] | None:
         if cls:
             return cls, name("op2")
     return None
+
+
+def _class_tail_meta(stream: bytes, start: int, cls: str) -> tuple[bool, list[str]]:
+    """(abstract, implemented interfaces) from the tail class records.
+
+    The class record is ``[u16 len][00 20][FQCN]``; its u32 class-flags
+    word follows the name directly.  Bit 0x40 is ZEND_ACC_ABSTRACT — every
+    one of the six abstract classes in the reference corpus carries it and
+    no concrete class does.  An implemented interface is stored in a
+    ``...$0`` metadata record followed by ``00 01 00 00 00`` and a
+    ``00 20`` name record (ArrayAccess, TaskInterface, WidgetInterface,
+    a SAPI driver base, ...).
+    """
+    want = cls.lower().lstrip("\\")
+    i = start
+    flags = None
+    while i + 4 <= len(stream):
+        ln = int.from_bytes(stream[i : i + 2], "little")
+        if (
+            0 < ln < 128
+            and stream[i + 2 : i + 4] == b"\x00\x20"
+            and i + 4 + ln <= len(stream)
+        ):
+            st = stream[i + 4 : i + 4 + ln]
+            if (
+                re.fullmatch(rb"[A-Za-z_\x80-\xff][A-Za-z0-9_\\\x80-\xff]*", st)
+                and b"\\" in st
+            ):
+                nm = st.decode("latin-1")
+                if nm.lower().lstrip("\\") == want:
+                    flags = u32(stream, i + 4 + ln)
+                    break
+            i += 4 + ln
+            continue
+        i += 1
+    if flags is None:
+        return False, []
+    ifaces: list[str] = []
+    p = start
+    while True:
+        m = stream.find(b"$0", p)
+        if m < 0:
+            break
+        if stream[m + 2 : m + 7] == b"\x00\x01\x00\x00\x00":
+            rs = m + 7
+            if rs + 4 <= len(stream):
+                ln = int.from_bytes(stream[rs : rs + 2], "little")
+                tag = stream[rs + 2 : rs + 4]
+                if (
+                    0 < ln < 128
+                    and tag == b"\x00\x20"
+                    and rs + 4 + ln <= len(stream)
+                ):
+                    nm = stream[rs + 4 : rs + 4 + ln]
+                    if re.fullmatch(
+                        rb"[A-Za-z_\x80-\xff][A-Za-z0-9_\\\x80-\xff]*", nm
+                    ):
+                        ifaces.append(nm.decode("latin-1"))
+        p = m + 2
+    return bool(flags & 0x40), ifaces
+
+
+_GUARDED_CLASS_RE = re.compile(
+    r"^(?P<ind>[ \t]*)if \(!\(?(?:\\?class_exists)\((['\"])(?P<name>[^'\"]+)\2\)\)?\) \{\n$"
+)
+
+
+def _fold_guarded_class(text: str) -> str:
+    """Place a hoisted class skeleton inside its `class_exists` guard.
+
+    A source `if (!class_exists('X')) { class X ... }` lowers to a JMPZ
+    whose taken arm is the DECLARE_CLASS node.  The structurer sees the
+    guard with an empty body (the DECLARE_CLASS is bookkeeping) and the
+    class skeleton is emitted after it, which would declare the class
+    unconditionally and fatal when it already exists (a recovered
+    exception class).  Move the generated top-level class block back under
+    the empty guard when the guard names that same class.
+    """
+    lines = text.splitlines(keepends=True)
+    i = 0
+    while i + 1 < len(lines):
+        m = _GUARDED_CLASS_RE.match(lines[i])
+        if m is None or lines[i + 1].rstrip("\n") != "}":
+            i += 1
+            continue
+        fq = m.group("name")
+        leaf = fq.rsplit("\\", 1)[-1]
+        j = i + 2
+        while j < len(lines) and lines[j].strip() == "":
+            j += 1
+        if j >= len(lines):
+            break
+        mo = re.match(r"class\s+([A-Za-z_][A-Za-z0-9_]*)\b", lines[j])
+        if mo is None or mo.group(1).lower() != leaf.lower():
+            i += 1
+            continue
+        end = None
+        for k in range(j, len(lines)):
+            if lines[k].rstrip("\n") in ("}", "} // end class"):
+                end = k
+                break
+        if end is None:
+            break
+        # a namespace between the guard and the class cannot move inside
+        # the guard (namespaces are only legal at top level)
+        if any(lines[x].lstrip().startswith("namespace ") for x in range(i + 2, j)):
+            i += 1
+            continue
+        block = ["    " + ln if ln.strip() else ln for ln in lines[j : end + 1]]
+        lines[i : end + 1] = [lines[i]] + block + ["}\n"]
+        i += len(block) + 2
+    return "".join(lines)
 
 
 def lift_file(
@@ -260,6 +423,19 @@ def lift_file(
             )
             prevN = off + size
 
+    # eval multi-class files: the constructor records give the class groups
+    # in wire order; the class-tail property table after the last wire
+    # belongs to the LAST group, not to the main/first class.
+    evalCtorClasses: list[str] = []
+    if not isProd:
+        for _rm, _rrec, _wb, _woff, _ws in subMeta:
+            if fn_name_of(_rm) == "__construct":
+                _c, _p = _ctor_class_rec(_rrec)
+                if _c is not None and _c.lower() not in [
+                    x.lower() for x in evalCtorClasses
+                ]:
+                    evalCtorClasses.append(_c)
+    lastEvalCtor = evalCtorClasses[-1] if evalCtorClasses else None
     # opcode capture pool: m5 auto-discovery + explicit --arena/--ktab
     captureDirs: list[str] = []
     if auto and not isProd:
@@ -374,11 +550,30 @@ def lift_file(
                 fn = fn + "_"
             sig = ", ".join(param_list(ctx))
             retPart = f": {ret}" if ret else ""
+            refMark = "&" if fn_returns_ref(r) else ""
+            # PHP-8 attributes from the wire's fn-info table.  The stored
+            # name is the compiler-resolved attribute class; ionCube
+            # prefixes an unqualified name with the file namespace, which
+            # makes the engine's global ReturnTypeWillChange inert — emit
+            # that one as the global attribute the source uses.
+            for ai in r.get("fninfo") or []:
+                nm = ai.get("name")
+                if not nm:
+                    continue
+                leaf = nm.rsplit("\\", 1)[-1]
+                attr = (
+                    "ReturnTypeWillChange"
+                    if leaf.lower() == "returntypewillchange"
+                    else nm.lstrip("\\")
+                )
+                out.append("    " * cd + "#[\\" + attr + "]\n")
             if fn.endswith("{closure}"):
                 # an anonymous function's name record holds the literal
                 # "{closure}" (production: namespaced `Ns\...\{closure}`) —
                 # emitting it as an identifier is invalid PHP
-                out.append("    " * cd + f"function ({sig}){retPart} {{\n")
+                out.append(
+                    "    " * cd + f"function {refMark}({sig}){retPart} {{\n"
+                )
             else:
                 # method modifiers: visibility bits + ZEND_ACC_STATIC (0x10)
                 # from the wire's fn_flags; free functions take none
@@ -389,7 +584,10 @@ def lift_file(
                         flags & 0x7, "public"
                     )
                     mods = vis + (" static" if flags & 0x10 else "") + " "
-                out.append("    " * cd + f"{mods}function {fn}({sig}){retPart} {{\n")
+                out.append(
+                    "    " * cd
+                    + f"{mods}function {refMark}{fn}({sig}){retPart} {{\n"
+                )
             ctx.idp = cd + 1
         else:
             ctx.idp = 1 if meta.get("classDepth") else 0
@@ -427,9 +625,10 @@ def lift_file(
     )
 
     # ---- closure-body pre-render: the {closure} nested sub-wires render as
-    # full (sig, ret, stmts) texts consumed by the declaring component's
-    # DECLARE_LAMBDA placeholder; source order matches the nested order ----
-    closureBodies: list[tuple[str, str, str]] = []
+    # full (sig, ret, stmts, by_ref) texts consumed by the declaring
+    # component's DECLARE_LAMBDA placeholder; source order matches the
+    # nested order ----
+    closureBodies: list[tuple[str, str, str, bool]] = []
     if mainR["end"] < len(mainWire):
         prevN = mainR["end"]
         for off, size, r in scan_wires(mainWire, mainR["end"]):
@@ -457,7 +656,7 @@ def lift_file(
                 body = walk_component(cctx).strip("\n")
                 _specs, ret = arg_specs(r)
                 sig = ", ".join(param_list(cctx))
-                closureBodies.append((sig, ret or "", body))
+                closureBodies.append((sig, ret or "", body, fn_returns_ref(r)))
             prevN = off + size
     mainMeta["closureBodies"] = closureBodies
 
@@ -494,7 +693,7 @@ def lift_file(
             body = walk_component(cctx).strip("\n")
             _specs, ret = arg_specs(rr)
             sig = ", ".join(param_list(cctx))
-            return (sig, ret or "", body)
+            return (sig, ret or "", body, fn_returns_ref(rr))
         except Exception:
             return None
 
@@ -582,9 +781,17 @@ def lift_file(
                     # class stands alone (a body using parent:: degrades
                     # visibly instead of silently extending \stdClass,
                     # which would change get_parent_class()/instanceof)
+                    _abs, _ifaces = _class_tail_meta(stream, tailStart, leaf)
+                    _imp = (
+                        " implements "
+                        + ", ".join("\\" + n.lstrip("\\") for n in _ifaces)
+                        if _ifaces
+                        else ""
+                    )
                     out.append(
-                        f"\nclass {leaf}"
+                        f"\n{'abstract ' if _abs else ''}class {leaf}"
                         + (f" extends {ext}" if ext else "")
+                        + _imp
                         + (
                             " { // class component: %d nodes" % mainR["thr"]
                             if debug
@@ -630,7 +837,9 @@ def lift_file(
     evalEnum: dict | None = None
     from .classrec import (
         class_tail,
+        doc_prop_table,
         enum_cases,
+        php_literal,
         prop_declare,
         promoted_param,
         scan_prop_table,
@@ -641,9 +850,13 @@ def lift_file(
         cases = enum_cases(stream, boff + bsize, subsEnd)
         ct = class_tail(stream, subsEnd, len(stream))
         if ct is None or not ct.get("props"):
-            sp = scan_prop_table(stream, subsEnd, len(stream))
-            if sp:
-                ct = {"props": sp, "consts": (ct or {}).get("consts", [])}
+            dp = doc_prop_table(stream, subsEnd, len(stream))
+            if dp:
+                ct = {"props": dp, "consts": (ct or {}).get("consts", [])}
+            else:
+                sp = scan_prop_table(stream, subsEnd, len(stream))
+                if sp:
+                    ct = {"props": sp, "consts": (ct or {}).get("consts", [])}
         if cases:
             evalEnum = {"cases": cases, "tail": ct}
             out.append(f"\nenum {subMeta[0][1][0]}: string {{\n")
@@ -728,6 +941,11 @@ def lift_file(
             mainCls = _legacy_class_hint(
                 stream, boff + bsize, subMeta[0][3] - 4
             )
+        if mainCls is None and evalCtorClasses:
+            # the file's primary class when the name cannot come from the
+            # filename (a renamed bundled library): constructors are
+            # declared in source order, so the first ctor names it
+            mainCls = evalCtorClasses[0]
         if mainCls is None and classFile:
             # a lowercase legacy class name (call_file, astinfo) is not in
             # the capitalized rec heuristic; if no sub descriptor carries a
@@ -739,7 +957,17 @@ def lift_file(
                 for _r, _rec, _wb, _off, _seeds in subMeta
                 for s in _rec
             )
-            if not hasCap:
+            # a *.class.php file can still hold plain functions: require
+            # real class evidence — a constructor or a property table —
+            # before wrapping
+            hasScope = any(
+                fn_name_of(_sm[0]) == "__construct" for _sm in subMeta
+            ) or bool(
+                evalEnum
+                and evalEnum.get("tail")
+                and evalEnum["tail"].get("props")
+            )
+            if not hasCap and hasScope:
                 base = _base
                 if base.endswith(".class.php"):
                     base = base[:-10]
@@ -749,6 +977,43 @@ def lift_file(
                     base = base[6:]
                 if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", base):
                     mainCls = base
+        if (
+            mainCls is None
+            and not classFile
+            and not evalCtorClasses
+            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", leaf)
+            and (
+                any(fn_name_of(_sm[0]) == "__construct" for _sm in subMeta)
+                # a constructor-less class still carries a property table
+                # (a functions-only listing for a class with four properties
+                # and `$this` methods)
+                or (
+                    evalEnum
+                    and evalEnum.get("tail")
+                    and evalEnum["tail"].get("props")
+                )
+            )
+        ):
+            # a class declared in a file not named *.class.php (legacy
+            # functions.inc/<class>.php layout) with no usable constructor
+            # class record: the filename stem is the class and a
+            # constructor or a property table confirms class scope.  A
+            # usable ctor record wins (driver code lives in such a file).
+            mainCls = leaf
+        # a *.class.php stem identifies the file's primary class: when the
+        # first constructor record names it, that record is the authoritative
+        # spelling and parent (the tail/filename heuristics can pick a later
+        # exception/helper class in multi-class files, and DECLARE_CLASS can
+        # name a later class in wire order)
+        for _rm, _rrec, _wb, _woff, _ws in subMeta:
+            if fn_name_of(_rm) == "__construct":
+                c, p = _ctor_class_rec(_rrec)
+                if (
+                    c is not None
+                    and c.rsplit("\\", 1)[-1].lower() == leaf.lower()
+                ):
+                    mainCls, mainParent = c, p
+                break
         if mainCls is not None and mainDecl is None and mainR["thr"] <= 1:
             # a trivial main component whose filename hint matches a
             # sub-function leaf is a function file, not a class: emit its
@@ -765,6 +1030,27 @@ def lift_file(
                 if ns:
                     out.append(f"\nnamespace {ns};\n")
                 mainCls = None
+        if mainCls is not None and not isProd:
+            # DECLARE_CLASS/ctor records can lowercase the class name and
+            # its namespace (module and package names are often lowercased);
+            # the descriptor records preserve the source spelling
+            _mc = _descriptor_case_name(
+                stream, boff + bsize, len(stream), mainCls
+            )
+            if _mc is not None:
+                mainCls = _mc
+        tailForMain = (
+            lastEvalCtor is None
+            # a single constructor group means the tail is that class's
+            # table; the record may name the parent/interface instead of
+            # the class itself (a ctor record can name its container/base)
+            or len(evalCtorClasses) <= 1
+            or (
+                mainCls is not None
+                and lastEvalCtor.lower().lstrip("\\")
+                == mainCls.lower().lstrip("\\")
+            )
+        )
         if mainCls is not None:
             ns = None
             clsLeaf = mainCls
@@ -780,12 +1066,20 @@ def lift_file(
             doc = tail_doccomment(stream, boff + bsize)
             if doc is not None:
                 out.append("\n" + doc + "\n")
+            _abs, _ifaces = _class_tail_meta(stream, boff + bsize, mainCls)
+            _imp = (
+                " implements "
+                + ", ".join("\\" + n.lstrip("\\") for n in _ifaces)
+                if _ifaces
+                else ""
+            )
             out.append(
-                f"\nclass {clsLeaf}"
+                f"\n{'abstract ' if _abs else ''}class {clsLeaf}"
                 + (f" extends {mainParent}" if mainParent else "")
+                + _imp
                 + " {\n"
             )
-            if evalEnum and evalEnum.get("tail"):
+            if evalEnum and evalEnum.get("tail") and tailForMain:
                 from .classrec import prop_declare
 
                 for p in evalEnum["tail"]["props"]:
@@ -794,12 +1088,7 @@ def lift_file(
                         continue
                     out.append(prop_declare(p) + "\n")
                 for nm, cv in evalEnum["tail"]["consts"]:
-                    lit = (
-                        f"'{cv}'"
-                        if isinstance(cv, str)
-                        else ("null" if cv is None else repr(cv))
-                    )
-                    out.append(f"    const {nm} = {lit};\n")
+                    out.append(f"    const {nm} = {php_literal(cv)};\n")
             openClass = clsLeaf
             evalMainOpen = True
 
@@ -811,6 +1100,10 @@ def lift_file(
         _o = subMeta[_si][3]
         _start = subMeta[_si - 1][3] + len(subMeta[_si - 1][2]) if _si else boff + bsize
         _pt = class_tail(stream, _start, _o - 4)
+        if not (_pt and _pt["props"]):
+            _dp = doc_prop_table(stream, _start, _o - 4)
+            if _dp:
+                _pt = {"props": _dp, "consts": (_pt or {}).get("consts", [])}
         if _pt and _pt["props"]:
             subTails[_si] = _pt
     for si, sm in enumerate(subMeta):
@@ -832,6 +1125,10 @@ def lift_file(
                     meta["cv"][k] = an
         classRec = None
         parentRec = None
+        recClass = [s for s in rec if s not in _PHP_ATTRIBUTES]
+        ctorCls = ctorParent = None
+        if fn == "__construct":
+            ctorCls, ctorParent = _ctor_class_rec(rec)
         # the class-record layout: a leading run of capitalized names is the
         # ancestor chain (class, parent, interfaces) — the declared class is
         # the first capitalized name AFTER that run (gdiverse4: ['Suit',
@@ -840,51 +1137,50 @@ def lift_file(
         # NE_Model) keeps rec[0]. Lowercase method/prop names in between
         # end the run. fn names never participate.
         capsRun = 0
-        for s in rec:
+        for s in recClass:
             if s[:1].isupper() and s.lower() != s:
                 capsRun += 1
             else:
                 break
-        for s in rec[capsRun:]:
+        for s in recClass[capsRun:]:
             if s == fn:
                 continue
-            if (
-                s[:1].isupper()
-                and s.lower() != s
-                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", s)
-            ):
+            if _rec_class_name(s):
                 classRec = s
                 break
         if classRec is None and capsRun:
             # a rec of just the current method name (`['SSL']`,
             # `['Fail2ban']`) is not a class record; treating it as one
             # opens bogus class groups inside the already-open main class
-            if rec and rec[0] != fn:
-                classRec = rec[0]
-                if capsRun > 1 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", rec[1]):
-                    parentRec = rec[1]
+            if recClass and recClass[0] != fn:
+                classRec = recClass[0]
+                if capsRun > 1 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", recClass[1]):
+                    parentRec = recClass[1]
         # the declared class was found after the ancestor run: the next
         # capitalized non-fn string after it is still the parent
         # (gt_diverse3 ctor: ['name', 'Dog', 'Animal', ...] -> extends Animal)
-        if classRec is not None and parentRec is None:
-            ki = rec.index(classRec)
-            for s in rec[ki + 1 :]:
+        if classRec is not None and parentRec is None and classRec in recClass:
+            ki = recClass.index(classRec)
+            for s in recClass[ki + 1 :]:
                 if s == fn:
                     continue
-                if (
-                    s[:1].isupper()
-                    and s.lower() != s
-                    and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\\]*", s)
-                ):
+                if _rec_class_name(s):
                     parentRec = s
                     break
-        # eval descriptor records in method components are method/parameter/
-        # local names, not additional class declarations: the main class
-        # skeleton (when there is one) is authoritative, and function-file
-        # components stay top-level.  Production keeps its class-group logic.
-        if not isProd and (evalMainOpen or disableRecClasses or not classFile):
-            classRec = None
-            parentRec = None
+        # Eval descriptor grouping: a constructor record is the reliable
+        # class boundary (its record names the class and parent).  In
+        # non-class files only a constructor starts a class, so helper
+        # functions stay top-level; once a class is open, non-constructor
+        # records are its methods/locals, not new class records.
+        if not isProd:
+            if disableRecClasses:
+                classRec = None
+                parentRec = None
+            elif ctorCls is not None:
+                classRec, parentRec = ctorCls, ctorParent
+            elif not classFile or openClass is not None:
+                classRec = None
+                parentRec = None
         if not isProd and not prodClassOpen:
             if evalMainOpen and classRec is not None:
                 # the first descriptor-named class group is the main class
@@ -917,19 +1213,26 @@ def lift_file(
                                 continue
                             out.append(prop_declare(p) + "\n")
                         for nm, cv in pt["consts"]:
-                            lit = (
-                                f"'{cv}'"
-                                if isinstance(cv, str)
-                                else ("null" if cv is None else repr(cv))
-                            )
-                            out.append(f"    const {nm} = {lit};\n")
+                            out.append(f"    const {nm} = {php_literal(cv)};\n")
                     out.append("}\n\n")
+                _abs, _ifaces = _class_tail_meta(stream, boff + bsize, classRec)
+                _imp = (
+                    " implements "
+                    + ", ".join("\\" + n.lstrip("\\") for n in _ifaces)
+                    if _ifaces
+                    else ""
+                )
                 out.append(
-                    f"\nclass {classRec}"
+                    f"\n{'abstract ' if _abs else ''}class {classRec}"
                     + (f" extends {parentRec}" if parentRec else "")
+                    + _imp
                     + " {\n"
                 )
-                if evalEnum and evalEnum.get("tail"):
+                tailForThis = lastEvalCtor is None or (
+                    classRec.lower().lstrip("\\")
+                    == lastEvalCtor.lower().lstrip("\\")
+                )
+                if evalEnum and evalEnum.get("tail") and tailForThis:
                     from .classrec import prop_declare
 
                     for p in evalEnum["tail"]["props"]:
@@ -938,12 +1241,7 @@ def lift_file(
                             continue
                         out.append(prop_declare(p) + "\n")
                     for nm, cv in evalEnum["tail"]["consts"]:
-                        lit = (
-                            f"'{cv}'"
-                            if isinstance(cv, str)
-                            else ("null" if cv is None else repr(cv))
-                        )
-                        out.append(f"    const {nm} = {lit};\n")
+                        out.append(f"    const {nm} = {php_literal(cv)};\n")
                 openClass = classRec
             elif classRec is None and openClass is None:
                 out.append("\n")
@@ -979,6 +1277,35 @@ def lift_file(
             # is inlined at the declaring component's DECLARE_LAMBDA site
             # (pre-render pass)
             continue
+        if fn is not None and not meta.get("classDepth"):
+            # a conditionally declared function (`if (!function_exists())
+            # { function f() {} }`) must stay inside its if: place the body
+            # at the declaration marker the main component emitted.
+            marker = f"/* function body emitted below: {fn} */"
+            hit = None
+            for ix, part in enumerate(out):
+                pos = part.find(marker)
+                if pos >= 0:
+                    hit = (ix, pos)
+                    break
+            if hit is not None:
+                start = len(out)
+                liftOne(wirebytes, r, meta, label)
+                body = "".join(out[start:])
+                del out[start:]
+                ix, pos = hit
+                part = out[ix]
+                line_start = part.rfind("\n", 0, pos) + 1
+                line_end = part.find("\n", pos)
+                line_end = len(part) if line_end < 0 else line_end + 1
+                indent = part[line_start:pos]
+                body = "".join(
+                    (indent + ln if ln.strip() else ln)
+                    for ln in body.splitlines(keepends=True)
+                )
+                body = body.rstrip("\n") + "\n"
+                out[ix] = part[:line_start] + body + part[line_end:]
+                continue
         liftOne(wirebytes, r, meta, label)
     if openClass is not None:
         out.append("}\n")
@@ -991,7 +1318,8 @@ def lift_file(
         if out[ix].lstrip().startswith("namespace "):
             out.insert(1, out.pop(ix))
             break
-    return {"text": "".join(out), "gt": gt_report, "stderr": stderr}
+    text = _fold_guarded_class("".join(out))
+    return {"text": text, "gt": gt_report, "stderr": stderr}
 
 
 __all__ = ["PipelineError", "lift_file"]

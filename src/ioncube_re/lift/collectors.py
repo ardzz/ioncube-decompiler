@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import re
 
-from .model import LiftContext
-from .operand import class_ref, unwrap
+from .model import _PLUMBING, _PURE, LiftContext
+from .operand import class_ref, php_quote, unwrap
 
 # the SEND tuple (SEND_FUNC_ARG 183 = the ungarbled +2 form, §7.5)
 _SEND = (65, 116, 117, 66, 67, 106, 50, 165, 119, 120, 183)
@@ -26,10 +26,57 @@ _DO = (60, 129, 130, 131)
 _INIT = (59, 61, 69, 112, 113, 118, 128)
 
 
+def _callable_expr(ctx: LiftContext, i: int) -> str | None:
+    """The callable an INIT_* + CALLABLE_CONVERT pair builds.
+
+    First-class callable syntax (`$this->m(...)`, `Foo::m(...)`, `f(...)`)
+    compiles to the INIT node followed by CALLABLE_CONVERT (200), whose res
+    is the callable value.  Render the portable callable forms: an array
+    callable for methods, a name string for functions."""
+    n = ctx.nodes[i]
+    op = ctx.op[i]
+    r = ctx.render
+    nm = r.callee_name(n, "op2")
+    if nm is None:
+        return None
+    q = php_quote(nm.encode("latin-1"))
+    if op == 112:
+        return "[" + r.obj(r.ex_op1(n)) + ", " + q + "]"
+    if op == 113:
+        e1 = n.ent.get("op1")
+        if e1 is not None and e1.kind == 0:
+            kw = {514: "parent", 515: "static"}.get(e1.raw, "self")
+            return "[" + kw + "::class, " + q + "]"
+        cls = class_ref(r.callee_name(n, "op1") or "")
+        return "[" + php_quote(cls.encode("latin-1")) + ", " + q + "]"
+    if op in (59, 61, 69, 118):
+        return q
+    return None
+
+
 def collect_call(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     op = ctx.op[i]
     r = ctx.render
+    # first-class callable: the INIT is consumed by CALLABLE_CONVERT, its
+    # result temp is the callable the following SEND passes
+    if op in _INIT and i + 1 < end and ctx.op.get(i + 1) == 200:
+        expr = _callable_expr(ctx, i)
+        if expr is not None:
+            cv = ctx.nodes[i + 1]
+            er = cv.ent.get("res")
+            ctx.emitted += 1
+            ctx.bk(i)
+            ctx.bk(i + 1)
+            if er is not None and (er.kind & 6):
+                slot = cv.res // 16
+                ctx.tempExpr[slot] = expr
+                ctx.tempDef[slot] = i + 1
+                uses = ctx.tempUses.get(slot, [])
+                if len(uses) > 1:
+                    ctx.line(cv)
+                    ctx.w(ctx.temp_name(slot, er.kind) + " = " + expr + ";")
+            return i + 2
     name = r.callee_name(n, "op2")
     if name is not None and "\\" in name and op in (59, 61, 69):
         # an unqualified function call inside a namespace arrives with the
@@ -47,7 +94,24 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
             callee = None
     else:
         callee = None
-    if name is None and op in (112, 118):
+    # INIT_USER_CALL: `call_user_func($fn, args...)` — op1 is the outer
+    # function name, op2 the callable/first argument, and the SEND_USER run
+    # carries the remaining arguments
+    userCall = None
+    userFirst = None
+    if op == 118:
+        from .operand import zval_name
+
+        e1, e2 = n.ent.get("op1"), n.ent.get("op2")
+        if e1 is not None and e1.kind == 1 and e1.raw < len(ctx.zvals):
+            userCall = zval_name(ctx.zvals[e1.raw])
+        if userCall is not None and e2 is not None:
+            userFirst = r.ch(r.ex_op2(n))
+        if userCall is None or userFirst is None:
+            userCall = None
+        else:
+            name = userCall
+    if name is None and op == 112:
         # a dynamic method name: $this->$method(...).  The callee is a
         # CV/temp, not an interned zval; the receiver renderer handles
         # the kind-0 $this marker.
@@ -84,7 +148,7 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
             ctx.bk(j)
             j += 1
         return j
-    args: list[str] = []
+    args: list[str] = [userFirst] if userCall is not None else []
     j = i + 1
     consumed: set[int] = set()  # arg-expression nodes (emitted, not bookkept)
     while j < end:
@@ -120,12 +184,18 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
             consumed.add(k)
             ctx.acct.add(k)
         j = nx
-    if op == 113:  # INIT_STATIC_METHOD_CALL
+    if userCall is not None:
+        expr = userCall + "(" + ", ".join(args) + ")"
+    elif op == 113:  # INIT_STATIC_METHOD_CALL
         raw1 = n.ent.get("op1")
         if raw1 is not None and raw1.kind == 0:
             # 514 = parent, 513 = self (the default sentinel); anything else
             # keeps a `self` fallback — `/*class-N*/::` is a parse error
             cls = {514: "parent", 515: "static"}.get(raw1.raw, "self")
+        elif raw1 is not None and (raw1.kind & 6 or raw1.kind == 8):
+            # a dynamic class: `$class::method(...)` (the operand is a
+            # CV/temp holding the class name or a computed string)
+            cls = "(" + r.ch(r.ex_op1(n)) + ")"
         else:
             cls = class_ref(r.callee_name(n, "op1") or "self /*class-unresolved*/")
         if cls.startswith("self") and ctx.meta.get("classDepth") is False:
@@ -134,7 +204,7 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
             # lint-valid with a visible trace
             cls = "UnresolvedScope"
         expr = f"{cls}::{name}(" + ", ".join(args) + ")"
-    elif op in (112, 118):
+    elif op == 112:
         # a receiver method call: $obj->name(...) — INIT_DYNAMIC_CALL (128)
         # has NO receiver; its op2 CV/var IS the callee (a closure value)
         expr = f"{r.obj(r.ex_op1(n))}->{name}(" + ", ".join(args) + ")"
@@ -175,6 +245,9 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
                 # the single reader inlines the call at its use
                 ctx.tempExpr[slot] = expr
                 ctx.tempDef[slot] = j
+                if not ctx.inlinable(slot, uses[0]):
+                    ctx.line(n)
+                    ctx.w(ctx.temp_name(slot, e.kind) + " = " + unwrap(expr) + ";")
             else:
                 # a multi-read result (loop condition + row destructure)
                 # keeps a named temp statement: the later refs render the
@@ -198,6 +271,15 @@ def collect_call(ctx: LiftContext, i: int, end: int) -> int:
 def collect_new(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     cls = ctx.render.callee_name(n, "op1")
+    if cls is None:
+        e1 = n.ent.get("op1")
+        if e1 is not None and (e1.kind & 6 or e1.kind == 8):
+            # a dynamic class (`new $class(...)`, `new ("Ns\\" . $n)()`);
+            # PHP >= 8.0 accepts a parenthesized class expression
+            ce = ctx.render.ch(ctx.render.ex_op1(n))
+            cls = "(" + ce + ")" if ce not in (None, "null") else None
+        elif e1 is not None and e1.kind == 0:
+            cls = {514: "parent", 515: "static"}.get(e1.raw, "self")
     if cls is None:
         # `new (` is a parse error; the bare stdClass placeholder keeps
         # the statement valid while flagging the unresolved ctor target
@@ -231,8 +313,13 @@ def collect_new(ctx: LiftContext, i: int, end: int) -> int:
             ctx.acct.add(k)
         j = nx
     expr = f"new {cls}(" + ", ".join(args) + ")"
-    if j < end and ctx.op[j] is not None and ctx.op[j] in _DO:
+    hadDo = j < end and ctx.op[j] is not None and ctx.op[j] in _DO
+    if hadDo:
         j += 1
+    # the value exists once the constructor DO has run, not at the NEW:
+    # inlining from the NEW would see the argument-run assignments as
+    # blockers and leave the reader's $Vn undefined
+    defIdx = j - 1 if hadDo else n.i
     e = n.ent.get("res")
     if e and (e.kind & 6):
         slot = n.res // 16
@@ -248,14 +335,17 @@ def collect_new(ctx: LiftContext, i: int, end: int) -> int:
                 and nxt.op1 // 16 == slot
             ):
                 ctx.tempExpr[slot] = expr
-                ctx.tempDef[slot] = n.i
+                ctx.tempDef[slot] = defIdx
             else:
                 ctx.line(n)
                 ctx.w(unwrap(expr) + ";")
         elif len(uses) == 1:
             # single reader: inline the constructor expression there
             ctx.tempExpr[slot] = expr
-            ctx.tempDef[slot] = n.i
+            ctx.tempDef[slot] = defIdx
+            if not ctx.inlinable(slot, uses[0]):
+                ctx.line(n)
+                ctx.w(ctx.temp_name(slot, e.kind) + " = " + unwrap(expr) + ";")
         elif e.kind & 4:
             # a VAR result (not a TMP): the consumers read the variable
             # slot directly ($V4), so emit the constructor as its
@@ -312,6 +402,19 @@ def collect_array(ctx: LiftContext, i: int, end: int) -> int:
             )
             j += 1
             continue
+        # a node that READS this literal's result is its consumer, not an
+        # element being built (`is_array($a) ? $a : [$a]` lowers to
+        # INIT_ARRAY, QM_ASSIGN reading the array temp).  Stop before it so
+        # tempExpr holds the literal when the consumer renders; recursing
+        # here emitted `$T27` in place of `[$allowed]`.
+        nj = ctx.nodes[j]
+        if array_slot is not None and any(
+            q is not None
+            and (q.kind & 6)
+            and getattr(nj, w) // 16 == array_slot
+            for w, q in (("op1", nj.ent.get("op1")), ("op2", nj.ent.get("op2")))
+        ):
+            break
         # an expression def between the elements: the next element being
         # built (FETCH_CONSTANT interleaved with the AAE run). A construct
         # starter (INIT_ARRAY / call INIT) ENDS this run — the remaining
@@ -322,6 +425,7 @@ def collect_array(ctx: LiftContext, i: int, end: int) -> int:
             and o != 71
             and o not in _INIT
             and o != 68
+            and (o in _PURE or o in _PLUMBING or o == 137)
             and ctx.nodes[j].ent.get("res")
             and (ctx.nodes[j].ent["res"].kind & 6)
         ):

@@ -5,7 +5,7 @@ ops that store a string into the node's res temp slot via ``ctx.def_temp``
 from __future__ import annotations
 
 from ..model import LiftContext
-from ..operand import bare, class_ref, concat_pair, zval_name
+from ..operand import bare, class_ref, concat_pair, prefix_operand, zval_name
 from ..registry import opcode_handler
 
 _BIN = {
@@ -84,7 +84,9 @@ def _unop(ctx: LiftContext, i: int, end: int) -> int:
             return m
     n = ctx.nodes[i]
     r = ctx.render
-    return ctx.def_temp(n, _UN[ctx.op[i]] + "(" + r.ch(r.ex_op1(n)) + ")", i)
+    return ctx.def_temp(
+        n, _UN[ctx.op[i]] + prefix_operand(r.ch(r.ex_op1(n))), i
+    )
 
 
 @opcode_handler(138)  # INSTANCEOF
@@ -180,6 +182,33 @@ def _coalesce(ctx: LiftContext, i: int, end: int) -> int:
                 ctx.emitted += 1
                 return q + 1
             v = r.ch(r.ex_op1(fb))
+            if v is not None and v[:2] in ("$T", "$V") and v[2:].isdigit():
+                # a nested `??` fallback: the QM reads a temp defined in the
+                # block the shortcut is about to skip.  Evaluate that block
+                # first when it is pure expression glue, so the temp renders
+                # its value instead of a bare name.
+                from ..emitter import emit_region
+                from ..model import _PLUMBING, _PURE
+
+                def _expr_region() -> bool:
+                    # fallback glue that folds to an expression: pure defs,
+                    # call machinery and branches staying inside the block
+                    # (`a ?? ($flag ? 'x' : 'y')`)
+                    for k in range(i + 1, q):
+                        o = ctx.op.get(k)
+                        if o in _PLUMBING or o in _PURE:
+                            continue
+                        if o in (42, 43, 44, 46, 47, 152):
+                            m = ctx.jt.get(k)
+                            if m is None or not (i + 1 <= m <= q):
+                                return False
+                            continue
+                        return False
+                    return True
+
+                if _expr_region():
+                    emit_region(ctx, i + 1, q)
+                    v = r.ch(r.ex_op1(fb))
             if v is not None:
                 ctx.bk(e2.raw - 1)
                 ctx.emitted += 1
@@ -192,6 +221,20 @@ def _coalesce(ctx: LiftContext, i: int, end: int) -> int:
 def _qm_assign(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     e = n.ent.get("res")
+    ret_slot = ctx.meta.get("matchReturnSlot")
+    if ret_slot is None:
+        ret_slot = ctx.meta.get("switchReturnSlot")
+    if e is not None and (e.kind & 6) and ret_slot is not None:
+        slot = n.res // 16
+        if slot == ret_slot:
+            # a return-match arm: the arm value is the function's return
+            from ..operand import unwrap
+
+            ctx.line(n)
+            ctx.w("return " + unwrap(ctx.render.ch(ctx.render.ex_op1(n))) + ";")
+            ctx.tempExpr.pop(slot, None)
+            ctx.emitted += 1
+            return i + 1
     result_slot = ctx.meta.get("matchResultSlot")
     if e is not None and (e.kind & 6) and result_slot is not None:
         slot = n.res // 16
@@ -201,8 +244,9 @@ def _qm_assign(ctx: LiftContext, i: int, end: int) -> int:
             from ..operand import unwrap
 
             ctx.line(n)
+            lhs = ctx.meta.get("matchResultLhs") or ctx.temp_name(slot, e.kind)
             ctx.w(
-                ctx.temp_name(slot, e.kind)
+                lhs
                 + " = "
                 + unwrap(ctx.render.ch(ctx.render.ex_op1(n)))
                 + ";"
@@ -222,12 +266,29 @@ def _cast(ctx: LiftContext, i: int, end: int) -> int:
     r = ctx.render
     if op == 123:
         # TYPE_CHECK carries a 1<<type BITMASK (64 = is_string,
-        # 128 = is_array) — not the plain type enum CAST uses
-        e = typecheck_bits(n.ext)
-        if "gettype($x)" in e:
-            e = e.replace("gettype($x)", "gettype(" + r.ch(r.ex_op1(n)) + ")")
+        # 128 = is_array) — not the plain type enum CAST uses.  The
+        # true/false bits have exact comparisons; gettype() cannot express
+        # them (`!== false` compiled to "every type except IS_FALSE").
+        operand = r.ch(r.ex_op1(n))
+        exact = {
+            4: " === false",  # 1<<IS_FALSE
+            8: " === true",  # 1<<IS_TRUE
+            1018: " !== false",  # all bits except IS_FALSE
+            1014: " !== true",  # all bits except IS_TRUE
+        }
+        if n.ext in exact:
+            e = "(" + operand + exact[n.ext] + ")"
         else:
-            e = e + "(" + r.ch(r.ex_op1(n)) + ")"
+            e = typecheck_bits(n.ext)
+            if "gettype($x)" in e:
+                e = e.replace("gettype($x)", "gettype(" + operand + ")")
+            else:
+                e = e + "(" + operand + ")"
     else:
-        e = "(" + cast_name(n.ext) + ")" + "(" + r.ch(r.ex_op1(n)) + ")"
+        e = (
+            "("
+            + cast_name(n.ext)
+            + ")"
+            + prefix_operand(r.ch(r.ex_op1(n)))
+        )
     return ctx.def_temp(n, e, i)

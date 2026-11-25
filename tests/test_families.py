@@ -82,9 +82,9 @@ def test_arith_unary_and_cast():
         cv={0: "x"},
     )
     emit_node(l, 0, l.thr)
-    assert l.tempExpr[7] == "!($x)"
+    assert l.tempExpr[7] == "!$x"
     emit_node(l, 1, l.thr)
-    assert l.tempExpr[8] == "(is_long)($x)"  # ext 3 = is_long (cast_name map)
+    assert l.tempExpr[8] == "(is_long)$x"  # ext 3 = is_long (cast_name map)
 
 
 def test_arith_type_check():
@@ -381,7 +381,9 @@ def test_echo_throw_exit_include():
 
 
 def test_bookkeeping_set_counts_once():
-    ops = [0, 63, 64, 70, 101, 102, 103, 104, 105, 107, 109, 124, 127, 137, 164]
+    # 109 (FETCH_CLASS) has its own handler now: it defines the dynamic
+    # class temp for `$class::$prop`
+    ops = [0, 63, 64, 70, 101, 102, 103, 104, 105, 107, 124, 127, 137, 164]
     l = mk([(op, {}, {}, 0) for op in ops])
     for k in range(l.thr):
         emit_node(l, k, l.thr)
@@ -440,5 +442,6 @@ def test_every_family_module_is_registered():
     for op in (136, 141, 57, 58, 142, 181):  # misc
         assert op in HANDLERS
     # the unknown fallback stays: no handlers for these
-    for op in (196, 198, 200, 202):
+    # (198 FETCH_GLOBALS and 200 CALLABLE_CONVERT are now supported)
+    for op in (196, 202):
         assert op not in HANDLERS

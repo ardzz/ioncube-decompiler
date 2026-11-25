@@ -6,7 +6,7 @@
 """
 
 from ioncube_re.lift.model import LiftContext
-from ioncube_re.lift.operand import class_ref, zval_php
+from ioncube_re.lift.operand import class_ref, prefix_operand, zval_php
 
 
 def mk():
@@ -50,3 +50,32 @@ def test_zval_php_parses_00442_class_constant_record():
         b"@3696:64:0:0;s15'EMAIL_TYPE_HTML262;0;1;22;267;0;2;27;"
     )
     assert zval_php({"type": 267, "str": raw}, 0) == "self::EMAIL_TYPE_HTML"
+
+
+def test_prefix_operand_leaves_terms_and_calls_alone():
+    # `!`/`~`/casts bind tighter than a term/call: no defensive parens
+    for e in (
+        "$x",
+        "$this->licensed",
+        "$a['x']",
+        "empty($a)",
+        "is_array($a)",
+        "foo($a && $b)",
+        "new Foo()",
+        "(bool)$a",
+        "!$x",
+        "1.5",
+        "'a && b'",
+    ):
+        assert prefix_operand(e) == e
+
+
+def test_prefix_operand_wraps_top_level_binary_operands():
+    for e in ("$a && $b", "$a == $b", "$a = $b", "$a ?? $b", "$a ? $b : $c"):
+        assert prefix_operand(e) == "(" + e + ")"
+
+
+def test_prefix_operand_collapses_redundant_outer_layers():
+    assert prefix_operand("(($x))") == "$x"
+    assert prefix_operand("(($a == $b))") == "($a == $b)"
+    assert prefix_operand("(($a && $b))") == "($a && $b)"

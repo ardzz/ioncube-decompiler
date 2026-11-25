@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ..opcodes import OPNAMES
 from .model import LoopInfo, LiftContext, _PLUMBING, _PURE
-from .operand import bare, class_ref, unwrap, zval_name
+from .operand import bare, class_ref, prefix_operand, unwrap, zval_name
 
 # the region between a short-circuit jump and its target must hold only
 # these pure expression defs for the &&/|| merge to fire (emitIf's set,
@@ -17,8 +17,79 @@ from .operand import bare, class_ref, unwrap, zval_name
 _SC_PURE = (
     frozenset({0})
     | frozenset(range(1, 22))
-    | {31, 51, 52, 53, 99, 114, 115, 121, 123, 138, 148, 154, 157, 169, 170, 188, 191}
+    | {
+        22,
+        23,
+        24,
+        26,
+        27,
+        28,
+        31,
+        # array-literal pieces on the right of &&/||
+        # (`in_array($x, [A, B])` in a condition)
+        71,
+        72,
+        # PRE/POST INC/DEC: expression defs with a res temp
+        # (`$str == "" && $count++ < 5`)
+        34,
+        35,
+        36,
+        37,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        65,
+        66,
+        67,
+        68,
+        69,
+        99,
+        100,
+        106,
+        112,
+        113,
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123,
+        128,
+        129,
+        130,
+        131,
+        137,
+        138,
+        148,
+        154,
+        156,
+        157,
+        165,
+        169,
+        170,
+        179,
+        183,
+        187,
+        188,
+        189,
+        190,
+        191,
+        192,
+    }
     | frozenset(range(80, 99))
+    | frozenset(range(173, 179))
 )
 
 
@@ -29,6 +100,116 @@ def _ternary_paren(e: str) -> str:
     (``a ? b : c ? d : e``); the extra parentheses keep the same parse.
     """
     return "(" + e + ")" if e and "?" in e else e
+
+
+def _region_ends_terminal(ctx: LiftContext, lo: int, hi: int) -> bool:
+    """True when the last real op of [lo, hi) always transfers control
+    (RETURN / RETURN_BY_REF / EXIT / THROW / GENERATOR_RETURN, possibly
+    behind a VERIFY_RETURN_TYPE).  Such a then-arm makes a statement-empty
+    else-arm safe to drop: the else arm's value-only work is inlined at its
+    later use, which only the fall-through path can reach."""
+    for k in range(hi - 1, lo - 1, -1):
+        op = ctx.op.get(k)
+        if op in (62, 79, 108, 111, 161):
+            return True
+        if op == 42:  # JMP compiled to a shared RETURN epilogue
+            t = ctx.jt.get(k)
+            if t is not None and (
+                ctx.op.get(t) in (62, 79, 108, 111, 161)
+                or (
+                    ctx.op.get(t) == 124
+                    and ctx.op.get(t + 1) in (62, 111)
+                )
+            ):
+                return True
+            return False
+        if op in (0, 70, 101, 124):  # NOP / FREE / EXT_STMT / verify
+            continue
+        return False
+    return False
+
+
+def _region_values_escape(ctx: LiftContext, lo: int, hi: int) -> bool:
+    """True when a temp defined in [lo, hi) is read outside that region.
+    A statement-empty else arm whose defs all stay inside it is pure dead
+    work (e.g. a conditional jump to its own merge) and safe to drop."""
+    for k in range(lo, hi):
+        e = ctx.nodes[k].ent.get("res")
+        if e is None or not (e.kind & 6):
+            continue
+        slot = e.raw // 16
+        for u in ctx.tempUses.get(slot, []):
+            if u < lo or u >= hi:
+                return True
+    return False
+
+
+def _shared_tail_assign(
+    ctx: LiftContext, i: int, t: int, cont: int, end: int
+) -> int | None:
+    """Recognise the encoder's conditional-assignment merge.
+
+    Both arms compute the same temp V, the then arm additionally performs
+    the target write as an assignment expression whose result feeds V, and
+    a single ASSIGN_DIM/OBJ + OP_DATA at the else-fallthrough point repeats
+    the write.  Leaving that merge after the if repeats the write on the
+    then path (a recovered method produced `1/Call/Call` instead of
+    `1/Call`).  Returning cont+2 pulls the merge write into the else arm,
+    where the then arm's own assignment already made it redundant.
+
+    Conservative: requires the then arm to carry an assignment with the
+    same rendered lvalue as the merge, linked to the merge's OP_DATA temp
+    through a QM_ASSIGN, and the else arm to define that temp itself.
+    Returns None otherwise (generic shape kept)."""
+    if cont + 1 >= end:
+        return None
+    m = ctx.nodes[cont]
+    if ctx.op.get(cont) not in (23, 24) or ctx.op.get(cont + 1) != 137:
+        return None
+    ve = ctx.nodes[cont + 1].ent.get("op1")
+    if ve is None or not (ve.kind & 6):
+        return None
+    vslot = ve.raw // 16
+    mop1 = ctx.render.ex_op1(m)
+    mop2 = ctx.render.ex_op2(m)
+    thenAssign = None
+    for k in range(t - 2, i, -1):  # then arm [i+1, t-1)
+        nk = ctx.nodes[k]
+        if ctx.op.get(k) not in (23, 24):
+            continue
+        if ctx.render.ex_op1(nk) == mop1 and ctx.render.ex_op2(nk) == mop2:
+            thenAssign = k
+            break
+    if thenAssign is None:
+        return None
+    re_ = ctx.nodes[thenAssign].ent.get("res")
+    if re_ is None or not (re_.kind & 6):
+        return None
+    aslot = re_.raw // 16
+    linked = False
+    for k in range(thenAssign + 1, t - 1):
+        nk = ctx.nodes[k]
+        if ctx.op.get(k) != 31:  # QM_ASSIGN
+            continue
+        r2 = nk.ent.get("res")
+        o2 = nk.ent.get("op1")
+        if (
+            r2 is not None
+            and (r2.kind & 6)
+            and r2.raw // 16 == vslot
+            and o2 is not None
+            and (o2.kind & 6)
+            and o2.raw // 16 == aslot
+        ):
+            linked = True
+            break
+    if not linked:
+        return None
+    for k in range(t, cont):
+        r2 = ctx.nodes[k].ent.get("res")
+        if r2 is not None and (r2.kind & 6) and r2.raw // 16 == vslot:
+            return cont + 2
+    return None
 
 
 def loop_exit_stmt(ctx: LiftContext, target: int) -> str | None:
@@ -101,17 +282,19 @@ def emit_jmp(ctx: LiftContext, i: int, end: int) -> int:
     if t is None:
         ctx.w(f"/* n{i}: JMP (unresolved target) */")
         return i + 1
-    if ctx.op[t] == 62:  # mid-function return compiled as JMP
-        return _jmp_return(ctx, i, t, t, end, f" -> n{t}")
-    if ctx.op[t] == 124 and ctx.op.get(t + 1) == 62:  # VERIFY+RETURN epilogue
-        return _jmp_return(ctx, i, t + 1, t, end, f" -> epilogue n{t}")
-    # (Part C) break/continue against the loop/switch stack
+    # (Part C) break/continue against the loop/switch stack — an explicit
+    # structured target wins over the jump-to-return shape (a match arm's
+    # terminal JMP targets the merge RETURN: it is the arm's break)
     stmt = loop_exit_stmt(ctx, t)
     if stmt is not None:
         ctx.line(n)
         ctx.w(stmt)
         ctx.emitted += 1
         return i + 1
+    if ctx.op[t] == 62:  # mid-function return compiled as JMP
+        return _jmp_return(ctx, i, t, t, end, f" -> n{t}")
+    if ctx.op[t] == 124 and ctx.op.get(t + 1) == 62:  # VERIFY+RETURN epilogue
+        return _jmp_return(ctx, i, t + 1, t, end, f" -> epilogue n{t}")
     if t > i and t <= end + 1:
         # bottom-tested while (with priming) — the generalization of the
         # old loop-entry form; loops.py owns it
@@ -179,6 +362,15 @@ def _pure_arm(ctx: LiftContext, lo: int, hi: int) -> int | None:
     for k in range(lo, hi):
         o = ctx.op[k]
         if o in _PLUMBING or o == 100:
+            continue
+        if o in (42, 43, 44, 46, 47, 152):
+            # a branch folded into an expression operand (the else arm's
+            # own short-circuit / nested ternary / `?:`, `empty($m) ? 0 :
+            # (a || b ? 2 : 1)`); its target must stay inside the arm or
+            # land on the arm's merge
+            m = ctx.jt.get(k)
+            if m is None or not (lo < m <= hi):
+                return None
             continue
         ne = ctx.nodes[k].ent.get("res")
         if o not in _PURE or not ne or not (ne.kind & 6):
@@ -260,7 +452,7 @@ def _ternary_chain(ctx: LiftContext, i: int, end: int) -> tuple[int, int] | None
         if txt is None:
             return None
         if ctx.op[h] == 44:
-            txt = "!(" + txt + ")"
+            txt = "!" + prefix_operand(txt)
         return txt
 
     # level 1 shape: [JMPZ at i][QM at i+1][JMP at i+2]
@@ -379,7 +571,11 @@ def _ternary_plan(
                 continue
             if not _pure_region(ctx, ts, k):
                 continue
-            inner = _ternary_plan(ctx, k, te, cond_start=ts)
+            # a direct CV/temp condition has no def run before the JMPZ:
+            # cond_start must not reach the branch node itself
+            inner = _ternary_plan(
+                ctx, k, te, cond_start=ts if k > ts else None
+            )
             if inner is None:
                 continue
             islot, iplan = inner
@@ -415,7 +611,9 @@ def _ternary_plan(
             continue
         if not _pure_region(ctx, t, k):
             continue
-        inner = _ternary_plan(ctx, k, merge, cond_start=t)
+        inner = _ternary_plan(
+            ctx, k, merge, cond_start=t if k > t else None
+        )
         if inner is None:
             continue
         islot, iplan = inner
@@ -471,7 +669,7 @@ def _ternary_exec(ctx: LiftContext, plan: dict) -> tuple[int, int] | None:
     if cond is None:
         return None
     if ctx.op[j] in (44, 47):
-        cond = "!(" + cond + ")"
+        cond = "!" + prefix_operand(cond)
     ts, te, _ = plan["true"]
     if plan.get("true_plan") is not None:
         m = _ternary_exec(ctx, plan["true_plan"])
@@ -531,11 +729,273 @@ def _sc_pure_region(ctx: LiftContext, lo: int, hi: int) -> bool:
                 return False
             k = m
             continue
+        if o in (42, 43, 44):
+            # a branch that stays inside the operand region: the ternary /
+            # QM lowering of the right term (`empty($x) && (is_countable($x)
+            # ? count($x) : 0)`); the folder renders it into one expression
+            m = ctx.jt.get(k)
+            if m is None or not (lo < m <= hi):
+                return False
+            k += 1
+            continue
         ne = ctx.nodes[k].ent.get("res")
         if not ne or not (ne.kind & 6) or o not in _SC_PURE:
             return False
         k += 1
     return True
+
+
+def _sc_chain_plan(ctx: LiftContext, i: int, t: int, end: int) -> dict | None:
+    """Recognise a swapped-layout `if (A && B && C) { then } else { else }`.
+
+    The encoder sometimes emits the false arm before the true arm:
+
+        JMPZ A -> false          (the outer branch at i)
+        <eval B>; JMPZ B -> false
+        <eval C>; JMPZ C -> false
+        JMP -> true_body          (at t-1)
+        false_body ... JMP -> merge
+        true_body  ... JMP -> merge
+
+    Rendering that as nested ifs leaves the true body after the else and
+    runs the false-path return unconditionally (the recovered method
+    returned "invalid URI" for every destination).  The
+    plain JMPZ chain is AND: any false jumps to the false arm, all true
+    fall through the tail JMP into the true arm."""
+    if ctx.op.get(i) != 43 or ctx.op.get(t - 1) != 42:
+        return None
+    skip = ctx.jt.get(t - 1)
+    if skip is None or skip <= t or skip > end:
+        return None
+    chain = [i]
+    k = i
+    for j in range(i + 1, t - 1):
+        if ctx.op.get(j) not in (43, 44):
+            continue
+        if ctx.op.get(j) != 43 or ctx.jt.get(j) != t:
+            return None
+        if not _sc_pure_region(ctx, k + 1, j):
+            return None
+        chain.append(j)
+        k = j
+    if not _sc_pure_region(ctx, k + 1, t - 1):
+        return None
+    # the false arm ends with its merge JMP right before the true body
+    if skip - 1 < t or ctx.op.get(skip - 1) != 42:
+        return None
+    mj = ctx.jt.get(skip - 1)
+    if mj is None or mj <= skip or mj > end:
+        return None
+    # the true arm ends with a JMP to the same merge
+    tJ = None
+    for j in range(skip, mj):
+        if ctx.op.get(j) == 42 and ctx.jt.get(j) == mj:
+            tJ = j
+            break
+    if tJ is None:
+        return None
+    merge = ctx.jt.get(mj) if ctx.op.get(mj) == 42 else mj
+    if merge is None or merge <= mj or merge > end:
+        return None
+    return {
+        "i": i,
+        "t": t,
+        "skip": skip,
+        "chain": chain,
+        "fJ": skip - 1,
+        "tJ": tJ,
+        "mj": mj,
+        "merge": merge,
+    }
+
+
+def _sc_chain_cond(ctx: LiftContext, k: int) -> str | None:
+    n = ctx.nodes[k]
+    e = n.ent.get("op1")
+    if e is not None and (e.kind & 6):
+        txt = ctx.tempExpr.get(n.op1 // 16)
+        if txt is not None:
+            return unwrap(txt)
+    return unwrap(ctx.render.ch(ctx.render.ex_op1(n)))
+
+
+def _emit_sc_chain(ctx: LiftContext, plan: dict) -> int | None:
+    from .emitter import emit_region
+
+    i = plan["i"]
+    t = plan["t"]
+    skip = plan["skip"]
+    chain = plan["chain"]
+    conds = []
+    prev = i
+    for k in chain:
+        if k == i:
+            c = _sc_chain_cond(ctx, k)
+        else:
+            emit_region(ctx, prev + 1, k)  # operand evaluation only
+            c = _sc_chain_cond(ctx, k)
+        if c is None:
+            return None
+        conds.append(c)
+        prev = k
+    emit_region(ctx, prev + 1, t - 1)  # trailing operand glue, no tail JMP
+    ctx.line(ctx.nodes[i])
+    ctx.w("if (" + " && ".join(conds) + ") {")
+    ctx.idp += 1
+    emit_region(ctx, skip, plan["tJ"])
+    ctx.idp -= 1
+    ctx.w("} else {")
+    ctx.idp += 1
+    emit_region(ctx, t, plan["fJ"])
+    ctx.idp -= 1
+    ctx.w("}")
+    ctx.emitted += 1
+    for k in (i, t - 1, plan["fJ"], plan["tJ"], plan["mj"], *chain):
+        ctx.bk(k)
+    return plan["merge"]
+
+
+def _elseif_cond(ctx: LiftContext, k: int) -> str | None:
+    c = ctx.condOv.get(k)
+    if c is not None:
+        return unwrap(ctx.render.ch(c))
+    n = ctx.nodes[k]
+    e = n.ent.get("op1")
+    if e is not None and (e.kind & 6):
+        slot = n.op1 // 16
+        es = ctx.effSlot.get(f"{k}:op1")
+        if es is not None:
+            slot = es
+        txt = ctx.tempExpr.get(slot)
+        if txt is not None:
+            return unwrap(txt)
+    return unwrap(ctx.render.ch(ctx.render.ex_op1(n)))
+
+
+def _elseif_chain_plan(ctx: LiftContext, i: int, end: int) -> dict | None:
+    """The encoder's `if/elseif/.../else` lowering.
+
+    A run of JMPNZ tests is followed by their true bodies packed after the
+    test region; each body ends in a JMP to one merge, and a trailing JMP
+    before the bodies targets the else body.  Reading this as nested
+    if/else pools every body into one arm (callerid_get_config's
+    is_string/strtolower/ctype_digit chain appended RAND(2,9),
+    RAND(0,9), RAND(1,9) and the CUT in a single else).
+    """
+    if ctx.op.get(i) != 44:
+        return None
+    t = ctx.jt.get(i)
+    if t is None or t <= i + 2 or t >= end:
+        return None
+    if ctx.op.get(t - 1) != 42:
+        return None
+    E = ctx.jt.get(t - 1)
+    if E is None or E <= t or E >= end:
+        return None
+    tests = [i]
+    for j in range(i + 1, t - 1):
+        o = ctx.op.get(j)
+        if o == 44:
+            bj = ctx.jt.get(j)
+            if bj is None or bj <= t:
+                return None
+            tests.append(j)
+        elif o in (43, 46, 47):
+            continue
+        elif o == 42:
+            return None
+    bodies = [t] + [ctx.jt[j] for j in tests[1:]]
+    if len(tests) < 2:
+        return None
+    if any(b2 <= b1 for b1, b2 in zip(bodies, bodies[1:])):
+        return None
+    if bodies[-1] >= E:
+        return None
+    bounds = bodies[1:] + [E]
+    merge = None
+    exits = []
+    for b, hi in zip(bodies, bounds):
+        q = hi - 1
+        if q <= b or ctx.op.get(q) != 42:
+            return None
+        mj = ctx.jt.get(q)
+        if mj is None or mj <= E or mj > end:
+            return None
+        if merge is None:
+            merge = mj
+        elif mj != merge:
+            return None
+        exits.append(q)
+    # the else arm ends with a JMP to the same merge
+    q = merge - 1
+    if q <= E or ctx.op.get(q) != 42 or ctx.jt.get(q) != merge:
+        return None
+    exits.append(q)
+    return {
+        "i": i,
+        "t": t,
+        "E": E,
+        "tests": tests,
+        "bodies": bodies,
+        "bounds": bounds,
+        "exits": exits,
+        "merge": merge,
+        "end": end,
+    }
+
+
+def _emit_elseif_chain(ctx: LiftContext, plan: dict) -> int | None:
+    from .emitter import emit_node, emit_region
+
+    i = plan["i"]
+    tests = plan["tests"]
+    bodies = plan["bodies"]
+    bounds = plan["bounds"]
+    conds = [_elseif_cond(ctx, i)]
+    if conds[0] is None:
+        return None
+    prev = i
+    for k in tests[1:]:
+        h = None
+        for x in range(prev + 1, k):
+            if ctx.op.get(x) in (46, 47):
+                h = x
+                break
+        if h is not None:
+            ht = ctx.jt.get(h)
+            if ht is None or not _sc_pure_region(ctx, h + 1, ht):
+                return None
+            emit_region(ctx, prev + 1, h)
+            emit_node(ctx, h, plan["end"])
+        else:
+            emit_region(ctx, prev + 1, k)
+        c = _elseif_cond(ctx, k)
+        if c is None:
+            return None
+        conds.append(c)
+        prev = k
+    emit_region(ctx, prev + 1, plan["t"] - 1)
+    ctx.line(ctx.nodes[i])
+    for idx, b in enumerate(bodies):
+        if idx == 0:
+            ctx.w("if (" + conds[idx] + ") {")
+        else:
+            ctx.w("} elseif (" + conds[idx] + ") {")
+        ctx.idp += 1
+        emit_region(ctx, b, bounds[idx] - 1)
+        ctx.idp -= 1
+        ctx.bk(bounds[idx] - 1)
+    ctx.w("} else {")
+    ctx.idp += 1
+    emit_region(ctx, plan["E"], plan["merge"] - 1)
+    ctx.idp -= 1
+    ctx.bk(plan["merge"] - 1)
+    ctx.w("}")
+    ctx.emitted += 1
+    for k in tests:
+        ctx.bk(k)
+    ctx.bk(plan["t"] - 1)
+    return plan["merge"]
 
 
 def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
@@ -548,6 +1008,22 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
     if cond is None or t is None:
         ctx.w(f"/* n{i}: {OPNAMES.get(op, op)} (cond/target unresolved) */")
         return i + 1
+    # if/elseif/else chain: JMPNZ tests with their true bodies pooled after
+    # the test region (callerid_get_config's is_string/strtolower chain)
+    if op == 44 and t > i + 2:
+        plan = _elseif_chain_plan(ctx, i, end)
+        if plan is not None:
+            m = _emit_elseif_chain(ctx, plan)
+            if m is not None:
+                return m
+    # swapped-layout `if (A && B && C) { then } else { else }` (the true
+    # arm sits after the false arm; plain JMPZ chain)
+    if op == 43 and t > i + 2:
+        plan = _sc_chain_plan(ctx, i, t, end)
+        if plan is not None:
+            m = _emit_sc_chain(ctx, plan)
+            if m is not None:
+                return m
     # &&/|| short-circuit (JMPZ_EX/JMPNZ_EX)
     if op in (46, 47) and t > i + 1 and n.ent.get("op1"):
         e1 = n.ent["op1"]
@@ -574,13 +1050,19 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
             # temp defs inline instead of staging `$T = ...` statements.
             saved = ctx.tempUses.get(slot, []) if slot is not None else []
             saved_res = ctx.tempUses.get(res_slot, []) if res_slot != slot else saved
+            saved_expr_assign = ctx.meta.get("exprAssign")
             if slot is not None:
                 ctx.tempUses[slot] = [t]
             if res_slot != slot:
                 ctx.tempUses[res_slot] = [t]
+            ctx.meta["exprAssign"] = True
             try:
                 emit_region(ctx, i + 1, t)  # temp defs only (guaranteed)
             finally:
+                if saved_expr_assign is None:
+                    ctx.meta.pop("exprAssign", None)
+                else:
+                    ctx.meta["exprAssign"] = saved_expr_assign
                 if slot is not None:
                     ctx.tempUses[slot] = [u for u in saved if u != i]
                 if res_slot != slot:
@@ -611,12 +1093,26 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
                 return t
     condTxt = unwrap(ctx.render.ch(cond))
     if op in (44, 47):
-        condTxt = "!(" + condTxt + ")"
+        condTxt = "!" + prefix_operand(condTxt)
     isCase = False
     if n.ent.get("op1") and (n.ent["op1"].kind & 6):
         d = ctx.tempDef.get(n.op1 // 16)
         if d is not None and ctx.op[d] in (48, 194):
             isCase = True
+    if op == 43 and t == i + 1 and end > i + 1:
+        # A terminal guard: the encoder stores "the next instruction" as a
+        # JMPZ target when the false path exits the enclosing region, so the
+        # rest of the region is the then-body (an installer's swap-warning
+        # guard, a licensed module's constructor guards).
+        # A real forward target would name the join instead.
+        ctx.line(n)
+        ctx.w(f"if ({condTxt}) {{")
+        ctx.idp += 1
+        emit_region(ctx, i + 1, end)
+        ctx.idp -= 1
+        ctx.w("}")
+        ctx.emitted += 1
+        return end
     if t <= i + 1:  # backward/empty target: no if structure
         ctx.line(n)
         if ctx.debug:
@@ -639,6 +1135,94 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
         if stmt is not None:
             ctx.line(n)
             ctx.w(f"if ({condTxt}) {{ {stmt} }}")
+            ctx.bk(t - 1)
+            ctx.emitted += 1
+            return t
+    # empty then with a garbled else-entry JMP (an empty-then guard:
+    # `if (!$flag) {} else { $obj->splice(...); }`).  The JMP right
+    # after the JMPZ carries the JMPZ's target instead of the merge; the
+    # else arm is the straight-line region starting at t and ending at the
+    # first forward JMP.
+    if (
+        op == 43
+        and i + 1 == t - 1
+        and ctx.op.get(t - 1) == 42
+        and ctx.jt.get(t - 1) == t
+        and t < end
+    ):
+        fJ = None
+        for j in range(t, end):
+            o = ctx.op.get(j)
+            if o in (77, 125) or o in (43, 44, 46, 47):
+                break  # the arm has its own control flow: leave generic
+            if o == 42:
+                mj = ctx.jt.get(j)
+                if mj is not None and mj > j:
+                    fJ = j
+                break
+        if fJ is not None:
+            ctx.line(n)
+            ctx.w(f"if ({condTxt}) {{")
+            ctx.w("} else {")
+            ctx.idp += 1
+            emit_region(ctx, t, fJ)
+            ctx.idp -= 1
+            ctx.w("}")
+            ctx.bk(i)
+            ctx.bk(t - 1)
+            ctx.bk(fJ)
+            ctx.emitted += 1
+            merge = ctx.jt.get(fJ)
+            if ctx.op.get(merge) == 42:
+                ctx.bk(merge)
+                m2 = ctx.jt.get(merge)
+                if m2 is not None and m2 > merge:
+                    merge = m2
+            return merge
+        # A non-straight-line else arm (the foreach in
+        # callerid_get_config).  The empty-then exit JMP's operand is
+        # garbled to the JMPZ target; when the if/else fills the rest of
+        # the enclosing region — its tail is the region's exit JMP or a
+        # terminator — that tail is the true merge: render the remainder
+        # as the else body and let the caller emit the tail (the case
+        # break/return).
+        tail = end - 1
+        tail_ok = False
+        if tail > t:
+            tail_op = ctx.op.get(tail)
+            if tail_op == 42:
+                mj = ctx.jt.get(tail)
+                tail_ok = mj is not None and mj >= end
+            elif tail_op in (62, 79, 108):
+                tail_ok = True
+        if tail_ok:
+            ctx.line(n)
+            ctx.w(f"if ({condTxt}) {{")
+            ctx.w("} else {")
+            ctx.idp += 1
+            emit_region(ctx, t, tail)
+            ctx.idp -= 1
+            ctx.w("}")
+            ctx.bk(i)
+            ctx.bk(t - 1)
+            ctx.emitted += 1
+            return tail
+    # a degenerate then-arm JMP outside a straight-line else: the encoder
+    # garbled its operand to the JMPZ target (a loop guard `if ($found)
+    # { break; }`).  Only the innermost real loop (continue target set)
+    # qualifies — a switch's LoopInfo has no continue targets, and
+    # breaking it could skip statements the empty then-arm must fall
+    # through to.
+    if (
+        i + 1 == t - 1
+        and ctx.op.get(t - 1) == 42
+        and ctx.jt.get(t - 1) == t
+        and ctx.loop_stack
+    ):
+        loop = ctx.loop_stack[-1]
+        if loop.continue_targets and any(b > t for b in loop.break_targets):
+            ctx.line(n)
+            ctx.w(f"if ({condTxt}) {{ break; }}")
             ctx.bk(t - 1)
             ctx.emitted += 1
             return t
@@ -751,12 +1335,30 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
     ctx.idp += 1
     if hasElse:
         cont = ctx.jt[t - 1]  # node before target = then-exit JMP
+        shared = _shared_tail_assign(ctx, i, t, cont, end)
+        if shared is not None:
+            cont = shared
         ctx.bk(t - 1)
         emit_region(ctx, i + 1, t - 1)
         ctx.idp -= 1
+        elseHdr = len(ctx.out)
         ctx.w("} else {")
         ctx.idp += 1
+        start = len(ctx.out)
         emit_region(ctx, t, cont)
+        # an else arm that only prepares a value inlined at its use emits
+        # no statement of its own; with a terminating then arm the else is
+        # the only fall-through path, so `else { }` is pure noise
+        elseLines = [
+            s
+            for s in ctx.out[start:]
+            if s.strip() and not s.strip().startswith(("//", "/*"))
+        ]
+        if not elseLines and (
+            _region_ends_terminal(ctx, i + 1, t - 1)
+            or not _region_values_escape(ctx, t, cont)
+        ):
+            del ctx.out[elseHdr:]
     else:
         emit_region(ctx, i + 1, t)
     ctx.idp -= 1

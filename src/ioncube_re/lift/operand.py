@@ -208,6 +208,242 @@ def unwrap(e: str) -> str:
     return e
 
 
+# PHP prefix operators (`!`, `~`, casts) bind tighter than binary operators,
+# so a term/call/chain or an already-parenthesised operand can follow them
+# directly (`!$x`, `!empty($x)`, `!($a && $b)`).  Only an unwrapped operand
+# with a top-level binary/ternary/assignment operator needs a new pair.
+_MULTI_OPS = (
+    "?->",
+    "**=",
+    "<<=",
+    ">>=",
+    "??=",
+    "===",
+    "!==",
+    "<=>",
+    "...",
+    "->",
+    "::",
+    "=>",
+    "&&",
+    "||",
+    "??",
+    "?:",
+    "==",
+    "!=",
+    "<>",
+    "<=",
+    ">=",
+    "<<",
+    ">>",
+    "**",
+    "++",
+    "--",
+    "+=",
+    "-=",
+    "*=",
+    "/=",
+    "%=",
+    ".=",
+    "&=",
+    "|=",
+    "^=",
+)
+_WORD_BINARY = ("and", "or", "xor", "instanceof")
+
+
+def _skip_quoted(s: str, i: int) -> int:
+    q = s[i]
+    i += 1
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+            continue
+        if s[i] == q:
+            return i + 1
+        i += 1
+    return i
+
+
+def _skip_heredoc(s: str, i: int) -> int:
+    nl = s.find("\n", i)
+    if nl < 0:
+        return len(s)
+    label = s[i + 3 : nl].strip()
+    if label[:1] in "'\"" and label[-1:] == label[:1]:
+        label = label[1:-1]
+    k = nl + 1
+    while k <= len(s):
+        end = s.find("\n", k)
+        line = s[k:] if end < 0 else s[k:end]
+        if line.strip() in (label, label + ";"):
+            return len(s) if end < 0 else end + 1
+        if end < 0:
+            break
+        k = end + 1
+    return len(s)
+
+
+def _skip_comment(s: str, i: int) -> int:
+    if s.startswith("/*", i):
+        end = s.find("*/", i + 2)
+        return len(s) if end < 0 else end + 2
+    end = s.find("\n", i + (2 if s.startswith("//", i) else 1))
+    return len(s) if end < 0 else end + 1
+
+
+def _skip_number(s: str, i: int) -> int:
+    n = len(s)
+    if s[i] == "0" and i + 1 < n and s[i + 1] in "xXbBoO":
+        j = i + 2
+        while j < n and (s[j].isalnum() or s[j] == "_"):
+            j += 1
+        return j
+    j = i
+    while j < n and (s[j].isdigit() or s[j] == "_"):
+        j += 1
+    if j < n and s[j] == "." and j + 1 < n and s[j + 1].isdigit():
+        j += 1
+        while j < n and s[j].isdigit():
+            j += 1
+    if j < n and s[j] in "eE":
+        k = j + 1
+        if k < n and s[k] in "+-":
+            k += 1
+        if k < n and s[k].isdigit():
+            j = k
+            while j < n and s[j].isdigit():
+                j += 1
+    return j
+
+
+def _is_ident_char(c: str) -> bool:
+    return c.isalnum() or c in "_\\" or ord(c) >= 0x80
+
+
+def _skip_atom(s: str, i: int) -> int:
+    """Skip a quoted string, heredoc, comment, number, variable or name."""
+    c = s[i]
+    if c in "'\"":
+        return _skip_quoted(s, i)
+    if s.startswith("<<<", i):
+        return _skip_heredoc(s, i)
+    if s.startswith("/*", i) or s.startswith("//", i) or c == "#":
+        return _skip_comment(s, i)
+    if c.isdigit() or (c == "." and i + 1 < len(s) and s[i + 1].isdigit()):
+        return _skip_number(s, i)
+    if c == "$":
+        j = i + 1
+        while j < len(s) and _is_ident_char(s[j]):
+            j += 1
+        return j
+    if c == "\\" or c.isalpha() or c == "_" or ord(c) >= 0x80:
+        j = i
+        while j < len(s) and _is_ident_char(s[j]):
+            j += 1
+        return j
+    return i
+
+
+def _strip_outer_group(s: str) -> str | None:
+    """The inside of a group spanning the whole string, else None."""
+    if not s.startswith("("):
+        return None
+    depth = 0
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        j = _skip_atom(s, i)
+        if j != i:
+            i = j
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return s[1:i] if i == n - 1 else None
+        i += 1
+    return None
+
+
+def _has_top_level_binary(s: str) -> bool:
+    depth = 0
+    expect_operand = True
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c in " \t\r\n":
+            i += 1
+            continue
+        j = _skip_atom(s, i)
+        if j != i:
+            if s[i:j].lower() in _WORD_BINARY:
+                return True
+            i = j
+            expect_operand = False
+            continue
+        if c in "([{":
+            depth += 1
+            i += 1
+            expect_operand = True
+            continue
+        if c in ")]}":
+            depth = max(0, depth - 1)
+            i += 1
+            expect_operand = False
+            continue
+        if depth:
+            i += 1
+            continue
+        matched = False
+        for op in _MULTI_OPS:
+            if not s.startswith(op, i):
+                continue
+            matched = True
+            if op in ("->", "?->", "::", "=>", "..."):
+                i += len(op)
+                expect_operand = True
+            elif op in ("++", "--"):
+                i += len(op)
+            else:
+                return True
+            break
+        if matched:
+            continue
+        if c in "@!~":
+            i += 1
+            continue
+        if c in "+-&":
+            if not expect_operand:
+                return True
+            i += 1
+            continue
+        if c in "*/%.|^=<>?:":
+            return True
+        i += 1
+    return False
+
+
+def prefix_operand(e: str) -> str:
+    """The operand text for a prefix operator/cast.
+
+    Terms, calls, chains and already-parenthesised expressions need no new
+    parens; an unwrapped top-level binary/ternary/assignment operand does.
+    Redundant outer layers are collapsed first: ``!((($a)))`` -> ``!$a``.
+    """
+    if not e:
+        return e
+    while True:
+        inner = _strip_outer_group(e)
+        if inner is None:
+            break
+        e = inner
+    return "(" + e + ")" if _has_top_level_binary(e) else e
+
+
 # PHP operators with precedence BELOW '.' (??, ?:, ||, &&, and/or/xor) —
 # operands carrying them keep their own parens inside a concat chain
 _CONCAT_UNSAFE_RE = re.compile(r"\?\?|\|\||&&|\? | or | and | xor ")
@@ -253,7 +489,11 @@ def typecheck_bits(ext: int) -> str:
 
 
 def cast_name(ext: int) -> str:
-    """A CAST (op 51) ext is the plain zend type enum."""
+    """A CAST (op 51) ext is the plain zend type enum.
+
+    PHP 8 compiles int/float/string/array/object casts to CAST (bool and
+    unset do not); ext 8 is IS_OBJECT, not a null test.
+    """
     m = {
         1: "is_null",
         2: "is_bool",
@@ -262,7 +502,7 @@ def cast_name(ext: int) -> str:
         5: "float",
         6: "string",
         7: "array",
-        8: "is_null",
+        8: "object",
         10: "object",
     }
     return m.get(ext, f"type{ext}")
@@ -423,6 +663,7 @@ __all__ = [
     "cast_name",
     "concat_pair",
     "php_quote",
+    "prefix_operand",
     "unwrap",
     "zval_name",
     "zval_php",

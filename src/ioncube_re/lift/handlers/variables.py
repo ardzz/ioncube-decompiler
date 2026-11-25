@@ -33,8 +33,8 @@ _SUPERGLOBALS = (
 _PUREDEF = (
     frozenset(range(80, 99))
     | frozenset(range(1, 22))
-    | frozenset(range(173, 179))
-    | {31, 51, 52, 53, 99, 121, 123, 138, 169, 170, 179, 192}
+    | frozenset(range(173, 180))
+    | {31, 51, 52, 53, 54, 55, 56, 99, 121, 122, 123, 138, 169, 170, 179, 187, 189, 190, 192}
     | {60, 68, 71, 129, 130, 131}
 )
 
@@ -47,6 +47,22 @@ def _assign(ctx: LiftContext, i: int, end: int) -> int:
         # `for` init: folds into the loop header (loops.bottom_tested_while)
         ctx.bk(i)
         return i + 1
+    if ctx.meta.get("exprAssign"):
+        # an assignment inside a short-circuit operand is an expression
+        # (`cond && ($x = value)`) — render it inline, not as a statement
+        e = n.ent.get("res")
+        if e and (e.kind & 6):
+            slot = n.res // 16
+            ctx.tempExpr[slot] = (
+                "("
+                + r.ch(r.ex_op1(n))
+                + " = "
+                + r.ch(r.assigned_value(n, "op2"))
+                + ")"
+            )
+            ctx.tempDef[slot] = i
+            ctx.emitted += 1
+            return i + 1
     ctx.line(n)
     v = r.ch(r.assigned_value(n, "op2"))
     e = n.ent.get("res")
@@ -86,16 +102,20 @@ def _incdec(ctx: LiftContext, i: int, end: int) -> int:
         + ctx.render.ch(v)
         + ("++" if op == 36 else "--" if op == 37 else "")
     )
-    # POST forms produce a value (e.g. `$attachments[$i++] = ...`): the
-    # res temp reads it back — register the expression
+    # Both POST (`$i++`) and PRE (`++$i`) forms produce a value when the
+    # encoder kept a result temp: `$attachments[$i++] = ...`,
+    # `$uid = (string) ++$lastUid`.  Register the expression; a pre-inc
+    # with no reader still runs for its side effect (statement path).
     e = n.ent.get("res")
-    if e and (e.kind & 6) and op in (36, 37):
+    if e and (e.kind & 6):
         slot = n.res // 16
-        if len(ctx.tempUses.get(slot, [])) > 1:
-            ctx.w(ctx.temp_name(slot, e.kind) + " = " + body + ";")
-        ctx.tempExpr[slot] = body
-        ctx.emitted += 1
-        return i + 1
+        uses = ctx.tempUses.get(slot, [])
+        if op in (36, 37) or uses:
+            if len(uses) > 1:
+                ctx.w(ctx.temp_name(slot, e.kind) + " = " + body + ";")
+            ctx.tempExpr[slot] = body
+            ctx.emitted += 1
+            return i + 1
     ctx.w(body + ";")
     ctx.emitted += 1
     return i + 1
@@ -122,7 +142,7 @@ def _assign_op(ctx: LiftContext, i: int, end: int) -> int:
                 and d < i
                 and slot in ctx.tempExpr
                 and ctx.op[d] in _PUREDEF
-                and not any(u >= i for u in ctx.tempUses.get(slot, []))
+                and not any(u > i + 1 for u in ctx.tempUses.get(slot, []))
             ):
                 val = ctx.tempExpr[slot]
     ctx.line(n)
@@ -170,6 +190,21 @@ def _assign_op(ctx: LiftContext, i: int, end: int) -> int:
             lhs = r.obj(r.ex_op1(n)) + "[" + r.ch(r.ex_op2(n)) + "]"
     else:  # ASSIGN_OP (compound, scalar lhs)
         lhs = r.ch(r.ex_op1(n))
+    if ctx.meta.get("exprAssign"):
+        # a property/dim write inside a short-circuit operand is an
+        # expression (`$flag && $this->mode = 'two'`): expose it as the
+        # assignment value instead of a statement
+        er = n.ent.get("res")
+        if er is not None and (er.kind & 6):
+            slot = n.res // 16
+            ctx.tempExpr[slot] = "(" + lhs + " = " + r.ch(val) + ")"
+            ctx.tempDef[slot] = i
+            ctx.emitted += 1
+            ctx.bk(i)
+            if dataN is not None:
+                ctx.bk(i + 1)
+                return i + 2
+            return i + 1
     if coalesce is not None:
         ctx.w(lhs + " ??= " + r.ch(val) + ";")
         ctx.emitted += 1
@@ -266,8 +301,13 @@ def _assign_obj_ref(ctx: LiftContext, i: int, end: int) -> int:
     return i + (2 if dataN is not None else 1)
 
 
-@opcode_handler(25)  # ASSIGN_STATIC_PROP (+ OP_DATA value)
+@opcode_handler(25, 29)  # ASSIGN_STATIC_PROP (+ OP_DATA value)
 def _assign_static_prop(ctx: LiftContext, i: int, end: int) -> int:
+    # op 29 (the wire's ASSIGN_STATIC_PROP_OP) carries the same operand
+    # shape and no operator, so it is the plain assignment here
+    # (a licensing module's `loadLicence` method:
+    # `self::$userLimit = $lic[$keyname]`).
+
     n = ctx.nodes[i]
     r = ctx.render
     dataN = ctx.nodes[i + 1] if i + 1 < ctx.thr and ctx.op[i + 1] == 137 else None
@@ -296,6 +336,11 @@ def _assign_static_prop(ctx: LiftContext, i: int, end: int) -> int:
         + ";"
     )
     ctx.emitted += 1
+    er = n.ent.get("res")
+    if er and (er.kind & 6):
+        # an assignment used as an expression (`return self::$x = $v;`)
+        # yields the assigned value to its reader
+        ctx.tempExpr[n.res // 16] = val
     if dataN is not None:
         ctx.bk(i + 1)
     return i + (2 if dataN is not None else 1)
@@ -317,7 +362,7 @@ def _name_var_text(ctx: LiftContext, n) -> str | None:
 
 
 @opcode_handler(
-    80, 83, 86, 89, 92, 95, 173, 174, 175, 176, 177, 178
+    80, 83, 86, 89, 92, 95
 )  # FETCH_* var-by-name
 def _fetch_by_name(ctx: LiftContext, i: int, end: int) -> int:
     """Fetch a variable by its NAME (op1): FETCH_R/W/RW/IS/FUNC_ARG/UNSET and
@@ -338,6 +383,53 @@ def _fetch_by_name(ctx: LiftContext, i: int, end: int) -> int:
     # the op2 fallback when op1 is not a zval at all
     fallback = r.ch(r.ex_op1(n)) if e is not None and e.kind == 1 else r.ch(r.ex_op2(n))
     return ctx.def_temp(n, "$GLOBALS[" + fallback + "]", i)
+
+
+@opcode_handler(173, 174, 175, 176, 177, 178)  # FETCH_STATIC_PROP_*
+def _fetch_static_prop(ctx: LiftContext, i: int, end: int) -> int:
+    """`Class::$prop` — op1 is the property name, op2 the class name (or
+    the self/parent sentinel)."""
+    n = ctx.nodes[i]
+    r = ctx.render
+    pe, ce = n.ent.get("op1"), n.ent.get("op2")
+    prop = None
+    if pe is not None and pe.kind == 1 and pe.raw < len(ctx.zvals):
+        prop = zval_name(ctx.zvals[pe.raw])
+    if prop is None:
+        prop = bare(r.ch(r.ex_op1(n)))
+    cls = None
+    if ce is not None and ce.kind == 1 and ce.raw < len(ctx.zvals):
+        cls = zval_name(ctx.zvals[ce.raw])
+    elif ce is not None and ce.kind == 0 and ce.raw != 0xFFFFFFFF:
+        cls = {514: "parent", 515: "static"}.get(ce.raw, "self")
+    if cls is None:
+        cls = bare(r.ch(r.ex_op2(n)))
+    expr = class_ref(cls) + "::$" + prop.lstrip("$")
+    if ctx.op[i] == 178:  # UNSET_STATIC_PROP
+        ctx.line(n)
+        ctx.w("unset(" + expr + ");")
+        ctx.emitted += 1
+        return i + 1
+    return ctx.def_temp(n, expr, i)
+
+
+@opcode_handler(109)  # FETCH_CLASS
+def _fetch_class(ctx: LiftContext, i: int, end: int) -> int:
+    """The class-entry temp a dynamic `$class::$prop` access reads.
+
+    op2 carries the class expression (a CV holding the name); the fixed
+    op1 marker (512) is encoder glue."""
+    n = ctx.nodes[i]
+    r = ctx.render
+    e2 = n.ent.get("op2")
+    expr = None
+    if e2 is not None and (e2.kind & 6 or e2.kind == 8):
+        expr = r.ch(r.ex_op2(n))
+    elif e2 is not None and e2.kind == 1 and e2.raw < len(ctx.zvals):
+        expr = class_ref(zval_name(ctx.zvals[e2.raw]) or "")
+    if expr is None:
+        expr = r.ch(r.ex_op1(n))
+    return ctx.def_temp(n, expr, i)
 
 
 @opcode_handler(99)  # FETCH_CONSTANT
@@ -375,11 +467,16 @@ def _fetch_class_constant(ctx: LiftContext, i: int, end: int) -> int:
     # `namespace` would otherwise capture a relative name.
     cls = None
     e1 = n.ent.get("op1")
-    if e1 is not None and e1.kind == 1 and e1.raw < len(ctx.zvals):
+    sentinel = None
+    if e1 is not None and e1.kind == 0:
+        sentinel = {513: "self", 514: "parent", 515: "static"}.get(e1.raw)
+    if sentinel is not None:
+        cls = sentinel
+    elif e1 is not None and e1.kind == 1 and e1.raw < len(ctx.zvals):
         cls = zval_name(ctx.zvals[e1.raw])
-    if cls is not None:
-        cls = class_ref(cls)
-    else:
+        if cls is not None:
+            cls = class_ref(cls)
+    if cls is None:
         cls = r.ch(r.ex_op1(n))
     const = None
     e2 = n.ent.get("op2")
@@ -435,7 +532,15 @@ def _isset(ctx: LiftContext, i: int, end: int) -> int:
     if op == 115:  # _DIM_OBJ: op1[expr][dim]
         arg = r.ch(r.ex_op1(n)) + "[" + r.ch(r.ex_op2(n)) + "]"
     elif op == 114:  # _VAR: op1 may BE the name (empty($_POST) on a superglobal)
-        arg = _name_var_text(ctx, n) or r.ch(r.ex_op1(n))
+        # or a computed temp name (isset(${'a' . $b})) — the
+        # variable-variable form; a CV operand stays a plain isset($x)
+        nm = _name_var_text(ctx, n)
+        if nm is not None:
+            arg = nm
+        elif e1 is not None and (e1.kind & 6):
+            arg = "${" + r.ch(r.ex_op1(n)) + "}"
+        else:
+            arg = r.ch(r.ex_op1(n))
     else:
         arg = r.ch(r.ex_op1(n))
     return ctx.def_temp(n, fn + "(" + arg + ")", i)
@@ -468,6 +573,13 @@ def _unset_cv(ctx: LiftContext, i: int, end: int) -> int:
     ctx.w("unset(" + ctx.render.ch(ctx.render.ex_op1(n)) + ");")
     ctx.emitted += 1
     return i + 1
+
+
+@opcode_handler(198)  # FETCH_GLOBALS
+def _fetch_globals(ctx: LiftContext, i: int, end: int) -> int:
+    # `$GLOBALS` as a value (print_r($GLOBALS, true)): the superglobal
+    # table; the operand slots are unused
+    return ctx.def_temp(ctx.nodes[i], "$GLOBALS", i)
 
 
 @opcode_handler(168)  # BIND_GLOBAL

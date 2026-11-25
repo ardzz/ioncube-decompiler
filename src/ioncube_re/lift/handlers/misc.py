@@ -39,7 +39,10 @@ def _throw(ctx: LiftContext, i: int, end: int) -> int:
 def _exit(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     ctx.line(n)
-    v = ctx.render.ex_op1(n)
+    e = n.ent.get("op1")
+    # a type-0 operand with a pointer-sized value is encoder junk, not an
+    # exit status (`exit;`, not `exit(3565308672)`)
+    v = ctx.render.ex_op1(n) if e is not None and e.kind != 0 else None
     ctx.w("exit" + (f"({v})" if v is not None and v != "null" else "") + ";")
     ctx.emitted += 1
     return i + 1
@@ -60,6 +63,13 @@ def _include(ctx: LiftContext, i: int, end: int) -> int:
     }
     expr = ctx.render.ch(ctx.render.ex_op1(n))
     kw = k.get(n.ext, "include")
+    e = n.ent.get("res")
+    if e is not None and (e.kind & 6):
+        # the include/eval return value is consumed (`$bRes = eval(...)`,
+        # `if (!include_once ...)`) — render it as the expression its reader
+        # inlines.  eval keeps its call parentheses inside the grouping.
+        inner = f"{kw}({expr})" if kw == "eval" else f"{kw} {expr}"
+        return ctx.def_temp(n, "(" + inner + ")", i)
     # `eval` requires parentheses; the include family is valid without
     ctx.w(f"{kw}({expr});" if kw == "eval" else f"{kw} {expr};")
     ctx.emitted += 1
@@ -71,10 +81,21 @@ def _declare(ctx: LiftContext, i: int, end: int) -> int:
     op = ctx.op[i]
     if op == 141:
         # the body is emitted as a separate component; keep the
-        # conditional block non-empty and point at it
+        # conditional block non-empty and point at it.  The name lets the
+        # pipeline place the body here (a declaration inside an `if` must
+        # stay inside it).
+        from ..operand import zval_name
+
         n = ctx.nodes[i]
+        e = n.ent.get("op1")
+        nm = None
+        if e is not None and e.kind == 1 and e.raw < len(ctx.zvals):
+            nm = zval_name(ctx.zvals[e.raw])
         ctx.line(n)
-        ctx.w("/* function body emitted below */")
+        if nm:
+            ctx.w(f"/* function body emitted below: {nm} */")
+        else:
+            ctx.w("/* function body emitted below */")
         ctx.emitted += 1
         return i + 1
     if op in (144, 145):
@@ -220,14 +241,15 @@ def _declare_lambda(ctx: LiftContext, i: int, end: int) -> int:
         if getter is not None:
             item = getter()
     if item is not None:
-        sig, ret, stmts = item
+        sig, ret, stmts, by_ref = item
         # strip the listing's line markers + the accounting comment: the
         # arrow-fn detection needs the bare statement text
         core = re.sub(r"(?m)^\s*// line \d+\s*$\n?", "", stmts)
         core = re.sub(r"/\* \d+ nodes[^*]*\*/\s*$", "", core).strip()
-        head = f"function ({sig}){clause}" + (f": {ret}" if ret else "")
+        refMark = "&" if by_ref else ""
+        head = f"function {refMark}({sig}){clause}" + (f": {ret}" if ret else "")
         m = re.fullmatch(r"return (.+);", core, re.S)
-        if m is not None and ret and "->" not in sig:
+        if m is not None and ret and "->" not in sig and not by_ref:
             # a single-return body with a declared type is an arrow fn
             expr = f"fn ({sig}){clause}: {ret} => {m.group(1).strip()}"
         else:
@@ -262,15 +284,27 @@ def _make_ref(ctx: LiftContext, i: int, end: int) -> int:
 
 @opcode_handler(156)  # SEPARATE (refcount copy-on-write; identity)
 def _separate(ctx: LiftContext, i: int, end: int) -> int:
-    return ctx.def_temp(ctx.nodes[i], ctx.render.ch(ctx.render.ex_op1(ctx.nodes[i])), i)
+    n = ctx.nodes[i]
+    e1, er = n.ent.get("op1"), n.ent.get("res")
+    if (
+        e1 is not None
+        and er is not None
+        and (e1.kind & 6)
+        and (er.kind & 6)
+        and n.op1 // 16 == n.res // 16
+    ):
+        # in-place copy: the producer's temp already holds the expression
+        ctx.bk(i)
+        return i + 1
+    return ctx.def_temp(n, ctx.render.ch(ctx.render.ex_op1(n)), i)
 
 
 # ---- the bookkeeping set (consumed into structures; counted, not rendered) ----
 
 
-@opcode_handler(0, 63, 64, 70, 101, 102, 103, 104, 105, 107, 109, 124, 127, 137, 164)
+@opcode_handler(0, 63, 64, 70, 101, 102, 103, 104, 105, 107, 124, 127, 137, 164)
 def _bookkeeping(ctx: LiftContext, i: int, end: int) -> int:
-    # NOP/EXT_*, FREE/FE_FREE, FETCH_CLASS, RECV*, OP_DATA,
+    # NOP/EXT_*, FREE/FE_FREE, RECV*, OP_DATA,
     # VERIFY_RETURN_TYPE, CATCH bind — bookkeeping
     ctx.bookkept += 1
     return i + 1

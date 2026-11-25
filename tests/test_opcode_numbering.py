@@ -131,8 +131,8 @@ def test_fetch_class_name_renders_get_class():
 
 def test_direct_match_table_becomes_a_switch():
     table = (
-        b"\x81[6'pbxacti1;4;4294967295;"
-        b"9'pbxtendedi1;4;4294967295;}0;775;0;1;7;"
+        b"\x81[6'modulei1;4;4294967295;"
+        b"9'componenti1;4;4294967295;}0;775;0;1;7;"
     )
     l = mk_wire(
         [
@@ -155,9 +155,10 @@ def test_direct_match_table_becomes_a_switch():
     emit_node(l, 0, l.thr)
     text = "".join(l.out)
     assert "switch (true)" in text
-    assert "case ($x) === 'pbxact':" in text
-    assert "case ($x) === 'pbxtended':" in text
-    assert "$T1 = 'yes';" in text
-    assert "$T1 = 'no';" in text
+    assert "case ($x) === 'module':" in text
+    assert "case ($x) === 'component':" in text
+    assert "return 'yes';" in text
+    assert "return 'no';" in text
     assert "break;" in text
     assert "default:" in text
+    assert "$T1" not in text

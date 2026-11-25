@@ -321,7 +321,7 @@ def test_ternary_jmpnz_inverts_condition():
         cv={0: "c", 1: "x"},
     )
     emit_region(l, 0, l.thr)
-    assert "$x = (!($c) ? 'yes' : 'no');" in out(l)
+    assert "$x = (!$c ? 'yes' : 'no');" in out(l)
 
 
 def test_ternary_multi_node_fetch_arms():
@@ -620,6 +620,38 @@ def test_single_case_jmpnz_switch():
     assert "switch ($x) {" in t
     assert "case 'a':" in t
     assert "default:" in t
+
+
+def test_single_case_switch_result_return():
+    """A dispatch chain whose arms assign one temp and whose merge RETURNs
+    it lowers each arm to its own `return <expr>;`."""
+    l = mk(
+        [
+            (16, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 6 * 16}, 0),
+            (44, {"op1": (2, 0), "op2": (0, 4)}, {"op1": 6 * 16}, 0),  # -> 3
+            (42, {"op1": (0, 6)}, {}, 0),  # default JMP -> 5
+            (31, {"op1": (1, 1), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (42, {"op1": (0, 8)}, {}, 0),  # -> 7
+            (31, {"op1": (1, 2), "res": (2, 0)}, {"res": 7 * 16}, 0),
+            (42, {"op1": (0, 8)}, {}, 0),  # -> 7
+            (62, {"op1": (2, 0)}, {"op1": 7 * 16}, 0),  # merge RETURN temp
+            (62, {"op1": (1, 3)}, {}, 0),  # epilogue
+        ],
+        zvals=[
+            {"type": 6, "str": b"download"},
+            {"type": 3},  # true
+            {"type": 2},  # false
+            {"type": 1},
+        ],
+        cv={0: "command"},
+    )
+    emit_region(l, 0, l.thr)
+    t = out(l)
+    assert "switch ($command) {" in t
+    assert "case 'download':" in t
+    assert "return true;" in t
+    assert "return false;" in t
+    assert "$T" not in t
 
 
 def test_switch_jumptable_fallback_without_chain():

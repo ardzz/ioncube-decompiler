@@ -11,8 +11,8 @@ from ..serarr import decode_serarr
 from .model import LoopInfo, LiftContext
 from .operand import php_quote, unwrap
 
-_CMP_CASE = (48, 194)  # one generation's dispatch comparisons
-_CMP_HEADER = (48, 194, 18)  # + IS_EQUAL: the other generation's form
+_CMP_CASE = (48, 194, 16, 18)  # CASE plus the IS_IDENTICAL/IS_EQUAL chain form
+_CMP_HEADER = (48, 194, 16, 17, 18)  # + the other generations' header chains
 _COND_JUMPS = (43, 44, 46, 47)
 
 
@@ -76,9 +76,28 @@ def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int
             if j + 1 not in ctx.jt:
                 break
             cases.append(
-                {"val": ctx.render.ex_op2(c), "target": ctx.jt[j + 1], "caseNode": j}
+                {
+                    "val": ctx.render.ex_op2(c),
+                    "target": ctx.jt[j + 1],
+                    "caseNode": j,
+                    "branch": o2,
+                }
             )
             j += 2
+            continue
+        # operand prelude between two comparisons (a fetched constant used
+        # by the next IS_IDENTICAL/IS_EQUAL): emit its temp def and step
+        # over it
+        if (
+            o1 not in cmp_ops
+            and j + 2 < end
+            and ctx.op.get(j + 1) in cmp_ops
+            and ctx.op.get(j + 2) in _COND_JUMPS
+        ):
+            from .emitter import emit_node
+
+            emit_node(ctx, j, end)
+            j += 1
             continue
         if cases and o1 == 42 and j in ctx.jt:
             # the chain-terminal JMP = the default branch
@@ -89,13 +108,19 @@ def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int
             break
         break
     stop = j - 1 if default_target is not None and j > i and ctx.op[j - 1] == 42 else j
-    if len(cases) < 2:
+    if not cases:
         if not header:
             return None
         cases, default_target = _table_pairs(ctx, i)
         if cases is None:
             return None
         stop = j = i + 1
+    if not header and cases:
+        # The dispatch form matches a case and jumps INTO its body (JMPNZ).
+        # An if/else-if chain jumps AWAY on a false condition (JMPZ), and a
+        # short-circuit operand uses the _EX forms — neither is a switch.
+        if any(c["branch"] != 44 for c in cases):
+            return None
     targets = [c["target"] for c in cases]
     minT = min(targets)
     maxT = max(targets)
@@ -153,10 +178,40 @@ def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int
                 freeAt = k
         if freeAt is not None:
             switchEnd = freeAt
+    if len(cases) == 1:
+        # A lone case has no next case target to bound its body; the case
+        # body's own break JMP (and the default arm's) point at the switch
+        # merge.  Inner conditionals emit their own forward JMPs, so take
+        # the furthest forward target in the region rather than the first.
+        for k in range(maxT, min(end, ctx.thr)):
+            if ctx.op.get(k) == 42:
+                t = ctx.jt.get(k, -1)
+                if switchEnd < t <= end:
+                    switchEnd = t
     entries = [(c["val"], c["target"], c["caseNode"]) for c in cases]
     if default_target is not None and stop <= default_target < switchEnd:
         entries.append((None, default_target, None))
     entries.sort(key=lambda e: e[1])
+    # A switch whose arms all assign one temp and whose merge node is
+    # `$dest = $temp` can write each arm straight to $dest: this drops the
+    # shared temp and the trailing assignment (the switch-result lowering).
+    resultSlot = None
+    resultLhs = None
+    consumeAssign = False
+    if switchEnd < ctx.thr and ctx.op.get(switchEnd) == 22:
+        an = ctx.nodes[switchEnd]
+        a1, a2 = an.ent.get("op1"), an.ent.get("op2")
+        if a1 is not None and a1.kind == 8 and a2 is not None and (a2.kind & 6):
+            rslot = an.op2 // 16
+            if (
+                ctx.tempUses.get(rslot) == [switchEnd]
+                and getattr(ctx, "tempDefCount", {}).get(rslot, 0) > 1
+            ):
+                resultSlot = rslot
+                resultLhs = ctx.cv_name(a1.raw)
+                consumeAssign = True
+                ctx.meta["switchResultSlot"] = resultSlot
+                ctx.meta["switchResultLhs"] = resultLhs
     sortedT = [e[1] for e in entries]
     lineNode = (
         ctx.nodes[cases[0]["caseNode"]]
@@ -180,8 +235,14 @@ def emit_switch(ctx: LiftContext, i: int, end: int, header: bool = False) -> int
     ctx.idp -= 1
     ctx.w("}")
     ctx.emitted += 1
+    if resultSlot is not None:
+        ctx.meta.pop("switchResultSlot", None)
+        ctx.meta.pop("switchResultLhs", None)
     if header:
         ctx.bk(i)
+    if consumeAssign:
+        ctx.bk(switchEnd)
+        return switchEnd + 1
     return min(switchEnd, end)
 
 

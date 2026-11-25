@@ -436,6 +436,7 @@ def lift_file(
             if fn_name_of(r) == "{closure}":
                 decl = u32(mainWire, off - 4) if off >= 4 else size
                 seeds = record_seeds(mainWire, prevN, off - 4, decl)
+                rec = desc_strings(mainWire, prevN, off - 4)
                 der = offline_parse(
                     mainWire[off : off + size],
                     seeds,
@@ -448,7 +449,7 @@ def lift_file(
                 cm: dict = {
                     "isFn": True,
                     "closure": True,
-                    "cv": cv_names(r, "eval", []),
+                    "cv": cv_names(r, "eval", rec),
                 }
                 cctx = LiftContext.build(mainWire[off : off + size], r, cm)
                 cctx.valid_php = valid_php
@@ -466,16 +467,16 @@ def lift_file(
     # lazily: a DECLARE_LAMBDA site consumes the next component, so a
     # closure body's own nested sites consume the nested components that
     # follow it (depth-first source order).
-    outerClosures: list[tuple[dict, bytes, tuple]] = [
-        (r, wirebytes, recSeeds)
-        for (r, _rec, wirebytes, _off, recSeeds) in subMeta
+    outerClosures: list[tuple[dict, bytes, tuple, list[str]]] = [
+        (r, wirebytes, recSeeds, rec)
+        for (r, rec, wirebytes, _off, recSeeds) in subMeta
         if fn_name_of(r) is not None and fn_name_of(r).endswith("{closure}")
     ]
 
     def nextOuterClosure():
         if not outerClosures:
             return None
-        r, wirebytes, recSeeds = outerClosures.pop(0)
+        r, wirebytes, recSeeds, rec = outerClosures.pop(0)
         try:
             der = offline_parse(
                 wirebytes, recSeeds, offlineIerg, offlineX, not isProd
@@ -484,7 +485,7 @@ def lift_file(
             cm: dict = {
                 "isFn": True,
                 "closure": True,
-                "cv": cv_names(rr, "eval", []),
+                "cv": cv_names(rr, "eval", rec),
                 "closure_at": nextOuterClosure,
             }
             cctx = LiftContext.build(wirebytes, rr, cm)
@@ -627,12 +628,22 @@ def lift_file(
 
     # ---- eval class/enum recovery ----
     evalEnum: dict | None = None
-    from .classrec import class_tail, enum_cases, prop_declare, promoted_param
+    from .classrec import (
+        class_tail,
+        enum_cases,
+        prop_declare,
+        promoted_param,
+        scan_prop_table,
+    )
 
     if not isProd:
         subsEnd = max((m[3] + len(m[2]) for m in subMeta), default=boff + bsize)
         cases = enum_cases(stream, boff + bsize, subsEnd)
         ct = class_tail(stream, subsEnd, len(stream))
+        if ct is None or not ct.get("props"):
+            sp = scan_prop_table(stream, subsEnd, len(stream))
+            if sp:
+                ct = {"props": sp, "consts": (ct or {}).get("consts", [])}
         if cases:
             evalEnum = {"cases": cases, "tail": ct}
             out.append(f"\nenum {subMeta[0][1][0]}: string {{\n")

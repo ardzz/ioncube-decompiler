@@ -279,6 +279,18 @@ class LiftContext:
                 self.tempExpr[slot] = expr
                 self.emitted += 1
                 return i + 1
+            if self.meta.get("switchResultSlot") == slot:
+                # the switch emitter recognised `$dest = $temp` after a
+                # switch whose arms define $temp; write each arm directly
+                # to $dest instead of keeping the shared temp.
+                name = self.meta.get("switchResultLhs") or self.temp_name(
+                    slot, e.kind
+                )
+                self.line(n)
+                self.w(name + " = " + unwrap(expr) + ";")
+                self.tempExpr[slot] = expr
+                self.emitted += 1
+                return i + 1
             if len(uses) > 1 or forward:
                 # a multi-read temp keeps a named definition statement: the
                 # references render the same $Tn/$Vn and every read sees the
@@ -315,6 +327,7 @@ _INIT_CALL = frozenset({59, 61, 69, 112, 113, 118, 128})
 # def and the ASSIGN read).
 _PLUMBING = frozenset(
     {
+        0,  # NOP: expression glue between a call and its QM/assign
         59,
         61,
         69,

@@ -251,6 +251,36 @@ def test_handle_exception_assign_dim_alias():
     assert "$arr['k'] = 'v';" in "".join(l.out)
 
 
+@pytest.mark.parametrize(("fetch_op", "expected"), [(78, 77), (126, 125)])
+def test_handle_exception_fe_reset_alias(fetch_op, expected):
+    """A 149 whose op1 is an iterable temp and whose res is the iterator
+    slot the following FE_FETCH reads is a FE_RESET (ktab nosig aliasing);
+    the by-ref fetch selects the FE_RESET_RW spelling."""
+    l = mk(
+        [
+            (81, {"op1": (8, 0), "op2": (1, 0), "res": (2, 0)}, {"res": 20 * 16}, 0),
+            (
+                149,
+                {"op1": (2, 0), "op2": (0, 4), "res": (4, 0)},
+                {"op1": 20 * 16, "res": 21 * 16},
+                0,
+            ),
+            (
+                fetch_op,
+                {"op1": (4, 0), "op2": (8, 1), "res": (2, 0)},
+                {"op1": 21 * 16, "res": 22 * 16},
+                0,
+            ),
+            (127, {"op1": (4, 0)}, {"op1": 21 * 16}, 0),
+            (62, {"op1": (1, 1)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"k"}, {"type": 1}],
+        cv={0: "items", 1: "v"},
+    )
+    assert l.op[1] == expected
+    assert l.feExit[1] == 4
+
+
 def test_handle_exception_with_res_stays_149():
     """A 149 carrying a result temp is a value op (the IS_EQUAL family
     with a CV left operand has this exact shape) — it must NOT be

@@ -15,8 +15,9 @@ from .operand import bare, class_ref, unwrap, zval_name
 # plus the FETCH family — a short-circuit's right term legally fetches:
 # `$_SERVER['REQUEST_METHOD'] == 'POST' && empty($_POST)`)
 _SC_PURE = (
-    frozenset(range(1, 22))
-    | {31, 51, 52, 53, 114, 115, 121, 123, 138, 148, 154, 157, 169, 170, 188, 191}
+    frozenset({0})
+    | frozenset(range(1, 22))
+    | {31, 51, 52, 53, 99, 114, 115, 121, 123, 138, 148, 154, 157, 169, 170, 188, 191}
     | frozenset(range(80, 99))
 )
 
@@ -165,11 +166,15 @@ def _pure_arm(ctx: LiftContext, lo: int, hi: int) -> int | None:
     slot, or None when the shape does not hold."""
     if hi <= lo:
         return None
-    if ctx.op[hi - 1] != 31:
-        return None
     ln = ctx.nodes[hi - 1]
     le = ln.ent.get("res")
     if not le or not (le.kind & 6):
+        return None
+    if ctx.op[hi - 1] == 31:
+        pass  # QM_ASSIGN arm
+    elif ctx.op[hi - 1] == 149:
+        pass  # HANDLE_EXCEPTION carrying the arm value
+    else:
         return None
     for k in range(lo, hi):
         o = ctx.op[k]
@@ -365,6 +370,41 @@ def _ternary_plan(
     if merge is None or merge <= t or merge > limit:
         return None
     slot = _pure_arm(ctx, j + 1, t - 1)
+    truePlan = None
+    if slot is None:
+        # nested ternary in the then-arm: [cond defs][JMPZ ...][linkers]
+        ts, te = j + 1, t - 1
+        for k in range(ts, te):
+            if ctx.op.get(k) not in (43, 44):
+                continue
+            if not _pure_region(ctx, ts, k):
+                continue
+            inner = _ternary_plan(ctx, k, te, cond_start=ts)
+            if inner is None:
+                continue
+            islot, iplan = inner
+            cur = islot
+            kk = iplan["merge"]
+            ok = True
+            while kk < te:
+                q = ctx.nodes[kk]
+                e = q.ent.get("op1")
+                res = q.ent.get("res")
+                if (
+                    ctx.op.get(kk) != 31
+                    or e is None
+                    or res is None
+                    or not (res.kind & 6)
+                    or (q.op1 // 16) != cur
+                ):
+                    ok = False
+                    break
+                cur = q.res // 16
+                kk += 1
+            if ok and kk == te:
+                slot = cur
+                truePlan = inner[1]
+                break
     if slot is None:
         return None
     if any(u < merge for u in ctx.tempUses.get(slot, [])):
@@ -411,6 +451,7 @@ def _ternary_plan(
         "t": t,
         "merge": merge,
         "true": (j + 1, t - 1, slot),
+        "true_plan": truePlan,
         "false": false,
     }
 
@@ -432,7 +473,14 @@ def _ternary_exec(ctx: LiftContext, plan: dict) -> tuple[int, int] | None:
     if ctx.op[j] in (44, 47):
         cond = "!(" + cond + ")"
     ts, te, _ = plan["true"]
-    emit_region(ctx, ts, te)
+    if plan.get("true_plan") is not None:
+        m = _ternary_exec(ctx, plan["true_plan"])
+        if m is None:
+            return None
+        _islot, iend = m
+        emit_region(ctx, iend, te)
+    else:
+        emit_region(ctx, ts, te)
     a = ctx.tempExpr.get(slot)
     false = plan["false"]
     if false[0] == "nested":
@@ -501,28 +549,40 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
         ctx.w(f"/* n{i}: {OPNAMES.get(op, op)} (cond/target unresolved) */")
         return i + 1
     # &&/|| short-circuit (JMPZ_EX/JMPNZ_EX)
-    if op in (46, 47) and t > i + 1 and n.ent.get("op1") and (n.ent["op1"].kind & 6):
-        slot = n.op1 // 16
-        left = ctx.tempExpr.get(slot)
+    if op in (46, 47) and t > i + 1 and n.ent.get("op1"):
+        e1 = n.ent["op1"]
+        slot = None
+        left = None
+        if e1.kind & 6:
+            slot = n.op1 // 16
+            left = ctx.tempExpr.get(slot)
+        if left is None:
+            # a CV/constant left operand (`$force || ...`): the expression
+            # is already available; only temp operands need def tracking
+            left = unwrap(ctx.render.ch(ctx.render.ex_op1(n)))
         # The branch's result temp may be a different slot than its input
         # (JMPNZ_EX V251 -> T252): the OR/AND value is in n.res, and the
         # right operand writes that slot, not the input.
         re_ = n.ent.get("res")
         res_slot = n.res // 16 if re_ is not None and (re_.kind & 6) else slot
-        if left is not None and _sc_pure_region(ctx, i + 1, t):
+        if left is not None and res_slot is not None and _sc_pure_region(
+            ctx, i + 1, t
+        ):
             # The chain writes the same condition temp at every level; its
             # registered uses are all the JMPZ_EX nodes.  While rendering
             # the right operand, expose only the next consumer (t) so the
             # temp defs inline instead of staging `$T = ...` statements.
-            saved = ctx.tempUses.get(slot, [])
+            saved = ctx.tempUses.get(slot, []) if slot is not None else []
             saved_res = ctx.tempUses.get(res_slot, []) if res_slot != slot else saved
-            ctx.tempUses[slot] = [t]
+            if slot is not None:
+                ctx.tempUses[slot] = [t]
             if res_slot != slot:
                 ctx.tempUses[res_slot] = [t]
             try:
                 emit_region(ctx, i + 1, t)  # temp defs only (guaranteed)
             finally:
-                ctx.tempUses[slot] = [u for u in saved if u != i]
+                if slot is not None:
+                    ctx.tempUses[slot] = [u for u in saved if u != i]
                 if res_slot != slot:
                     ctx.tempUses[res_slot] = [u for u in saved_res if u != i]
             right = ctx.tempExpr.get(res_slot)
@@ -543,7 +603,7 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
                 ctx.tempUses[res_slot] = [
                     u for u in ctx.tempUses.get(res_slot, []) if u != i
                 ]
-                if res_slot != slot:
+                if slot is not None and slot != res_slot:
                     ctx.tempUses[slot] = [
                         u for u in ctx.tempUses.get(slot, []) if u != i
                     ]
@@ -567,6 +627,21 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
             )
             ctx.emitted += 1
         return i + 1
+    # a guard whose then arm is a single loop-exit JMP: `if (cond) continue;`
+    if (
+        i + 1 == t - 1
+        and ctx.op[t - 1] == 42
+        and t - 1 in ctx.jt
+    ):
+        stmt = loop_exit_stmt(ctx, ctx.jt[t - 1])
+        if stmt is None and ctx.loop_stack and ctx.jt[t - 1] <= i:
+            stmt = "continue;"  # backward JMP to the loop head
+        if stmt is not None:
+            ctx.line(n)
+            ctx.w(f"if ({condTxt}) {{ {stmt} }}")
+            ctx.bk(t - 1)
+            ctx.emitted += 1
+            return t
     # while-at-head: JMPZ at the head, body, then a JMP back to this node
     if t - 1 >= i + 1 and ctx.op[t - 1] == 42 and ctx.jt.get(t - 1) == i:
         ctx.line(n)
@@ -588,6 +663,25 @@ def emit_if(ctx: LiftContext, i: int, end: int, op: int) -> int:
         and ctx.jt[t - 1] > t
         and ctx.jt[t - 1] <= end
     )
+    if hasElse:
+        skip = ctx.jt[t - 1]
+        # terminal if/else placed then-after-else: the then body is empty
+        # and the false-arm JMP lands directly on the then block (usually a
+        # RETURN); the generic shape would leave the then body after the if
+        if i + 1 == t - 1 and ctx.op.get(skip) in (62, 108, 79):
+            ctx.line(n)
+            ctx.w(f"if ({condTxt}) {{")
+            ctx.idp += 1
+            emit_region(ctx, skip, skip + 1)
+            ctx.idp -= 1
+            ctx.w("} else {")
+            ctx.idp += 1
+            emit_region(ctx, t, skip)
+            ctx.idp -= 1
+            ctx.w("}")
+            ctx.emitted += 1
+            ctx.bk(t - 1)
+            return skip + 1
     # (Part C) ternary: both arms are pure-def runs ending in a QM_ASSIGN
     # into the same temp slot (the JMPZ/QM_ASSIGN lowering; arms may be
     # multi-node: `isset($a['k']) ?

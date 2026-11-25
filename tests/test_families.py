@@ -116,6 +116,41 @@ def test_arith_coalesce_instanceof_fn1():
     assert l.tempExpr[9] == "strlen($x)"
 
 
+def test_arith_coalesce_dim_assign():
+    """`$arr[$k] ??= 'v'`: the fallback block carries the conditional
+    ASSIGN_DIM + OP_DATA; the coalesce must fold it into a self-coalescing
+    write rather than skipping the block (empty loop body)."""
+    l = mk(
+        [
+            (90, {"op1": (8, 0), "op2": (8, 1), "res": (2, 0)}, {"res": 20 * 16}, 0),
+            (
+                169,
+                {"op1": (2, 0), "op2": (0, 5), "res": (2, 0)},
+                {"op1": 20 * 16, "res": 22 * 16},
+                0,
+            ),
+            (
+                23,
+                {"op1": (8, 0), "op2": (8, 1), "res": (2, 0)},
+                {"res": 21 * 16},
+                0,
+            ),
+            (137, {"op1": (1, 0)}, {}, 0),
+            (31, {"op1": (2, 0), "res": (2, 0)}, {"op1": 21 * 16, "res": 22 * 16}, 0),
+            (70, {"op1": (2, 0)}, {"op1": 22 * 16}, 0),
+            (62, {"op1": (1, 1)}, {}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"v"}, {"type": 1}],
+        cv={0: "arr", 1: "k"},
+    )
+    from ioncube_re.lift import emit_region
+
+    emit_region(l, 0, l.thr)
+    t = out(l)
+    assert "$arr[$k] = $arr[$k] ?? 'v';" in t
+    assert l.unknown == 0
+
+
 def test_arith_qm_assign_passthrough():
     l = mk(
         [(31, {"op1": (1, 0), "res": (2, 0)}, {"res": 7 * 16}, 0)],
@@ -193,6 +228,23 @@ def test_fetch_r_superglobal_vs_globals():
     assert (
         l.tempExpr[8] == "$GLOBALS['registry']"
     )  # symbol-table key: quoted (ic_lift parity)
+
+
+def test_fetch_w_computed_name():
+    """`${$name} = 'v'`: FETCH_W's op1 is the name expression (a CV/temp),
+    not a zval — render the variable-variable form."""
+    l = mk(
+        [
+            (83, {"op1": (8, 0), "res": (4, 0)}, {"res": 20 * 16}, 0),
+            (22, {"op1": (4, 0), "op2": (1, 0)}, {"op1": 20 * 16}, 0),
+        ],
+        zvals=[{"type": 6, "str": b"v"}],
+        cv={0: "name"},
+    )
+    emit_node(l, 0, l.thr)
+    assert l.tempExpr[20] == "${$name}"
+    emit_node(l, 1, l.thr)
+    assert "${$name} = 'v';" in out(l)
 
 
 def test_fetch_constant_bare_reference():

@@ -159,10 +159,10 @@ def _alias_149(ctx) -> None:
     """HANDLE_EXCEPTION (149) carrying live operands — the ktab nosig
     aliasing (LINT-GATE.md: 149 decoded where INIT_METHOD_CALL / SEND /
     FETCH_OBJ_W / FETCH_CONSTANT belong, "live operands flow through the
-    node"; a genuine 149 landing pad has no operand payload). The four
-    shapes below are the ones whose successor contract makes the true op
-    unambiguous; the value-op aliases (IS_EQUAL, read-side FETCH_OBJ_R,
-    ASSIGN...) stay 149 and degrade like the reference lifter."""
+    node"; a genuine 149 landing pad has no operand payload). The shapes
+    below are the ones whose successor contract makes the true op
+    unambiguous; the remaining value-op aliases (IS_EQUAL, read-side
+    FETCH_OBJ_R, ...) stay 149 and degrade like the reference lifter."""
     import re
 
     from .operand import zval_name
@@ -206,6 +206,27 @@ def _alias_149(ctx) -> None:
                 ctx.op[n.i] = 61  # lowercase name + junk k0 op1: builtin-ish
             else:
                 ctx.op[n.i] = 112  # camelCase + junk k0 op1: the $this marker
+            continue
+
+        # FE_RESET: op1 = the iterable temp, res = the iterator temp the
+        # immediately following FE_FETCH_R/RW reads as its op1, op2 = the
+        # loop's exit target (`foreach (.. as $k => $v)`).
+        nxt = ctx.nodes[n.i + 1] if n.i + 1 < ctx.thr else None
+        ne1 = nxt.ent.get("op1") if nxt is not None else None
+        if (
+            e1 is not None
+            and (e1.kind & 6)
+            and er is not None
+            and (er.kind & 6)
+            and e2 is not None
+            and e2.kind == 0
+            and 0 < e2.raw <= ctx.thr
+            and nop in (78, 126)
+            and ne1 is not None
+            and (ne1.kind & 6)
+            and (nxt.op1 >> 4) == (n.res >> 4)
+        ):
+            ctx.op[n.i] = 125 if nop == 126 else 77
             continue
 
         # plain jump: op1 is the 1-based target, with no res/op2 payload.
@@ -306,6 +327,18 @@ def _alias_149(ctx) -> None:
             and _unused(n, "res")
         ):
             ctx.op[n.i] = 23 if nop == 137 else 22
+            continue
+
+        # value RETURN: the 149 carries only the returned expression (no
+        # result temp, no second operand) — `return <expr>;` inside a
+        # guard body (Sysadmin genAlertGlyphicon n16)
+        if (
+            e1 is not None
+            and (e1.kind & 6 or e1.kind in (1, 2, 4, 6, 8))
+            and _unused(n, "op2")
+            and _unused(n, "res")
+        ):
+            ctx.op[n.i] = 62
 
 
 # ---- jump-target calibration ----
@@ -322,12 +355,33 @@ def _calibrate_jumps(ctx) -> None:
             v = (n.ent["op1"] if f == 42 else n.ent["op2"]).raw
             t = v - 1  # entry v = target+1
             if t == n.i or t < 0 or t >= ctx.thr:
-                # the off-by-one family: a dead-code JMP after RETURN
-                # targets the next node (v); the mid-RETURN form targets
-                # the RETURN itself (v+1). Taking v+1 unconditionally
-                # skipped the next statement's INIT and orphaned the
-                # call chain (cwhois.php n135: JMP e136 -> INIT 136).
-                t = v + 1 if ctx.op.get(v + 1) in (62, 124) else v
+                # Relative-target family: the stored value is an offset from
+                # this branch (HttpsSetup callback: JMPZ at n2, value 3,
+                # target n5 = the function-end RETURN).  Prefer that when it
+                # lands on a terminator; otherwise the off-by-one rules.
+                rel = n.i + v
+                if (
+                    0 <= rel < ctx.thr
+                    and rel != n.i
+                    and ctx.op.get(rel) in (62, 124)
+                ):
+                    # the branch target can be the consequent's RETURN;
+                    # the implicit function-end RETURN is the real join
+                    final = ctx.thr - 1
+                    if (
+                        rel != final
+                        and ctx.op.get(final) in (62, 124)
+                        and ctx.op.get(rel) == 62
+                    ):
+                        rel = final
+                    t = rel
+                else:
+                    # the off-by-one family: a dead-code JMP after RETURN
+                    # targets the next node (v); the mid-RETURN form targets
+                    # the RETURN itself (v+1). Taking v+1 unconditionally
+                    # skipped the next statement's INIT and orphaned the
+                    # call chain (cwhois.php n135: JMP e136 -> INIT 136).
+                    t = v + 1 if ctx.op.get(v + 1) in (62, 124) else v
             if 0 <= t < ctx.thr:
                 ctx.jt[n.i] = t
         if f in (77, 125) and n.ent.get("op2"):  # FE_RESET_R/RW: exit = v
@@ -419,6 +473,7 @@ def _shift_var_reads(ctx) -> None:
 
 
 def _register_temps(ctx) -> None:
+    ctx.tempDefCount: dict[int, int] = {}
     for n in ctx.nodes:
         for wname in ("res", "op1", "op2"):
             e = n.ent.get(wname)
@@ -431,6 +486,7 @@ def _register_temps(ctx) -> None:
                     slot = es
             if wname == "res":
                 ctx.tempDef[slot] = n.i
+                ctx.tempDefCount[slot] = ctx.tempDefCount.get(slot, 0) + 1
             elif ctx.op[n.i] not in _SKIPUSE:
                 ctx.tempUses.setdefault(slot, []).append(n.i)
 

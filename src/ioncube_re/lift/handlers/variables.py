@@ -329,9 +329,13 @@ def _fetch_by_name(ctx: LiftContext, i: int, end: int) -> int:
     var = _name_var_text(ctx, n)
     if var is not None:
         return ctx.def_temp(n, var, i)
+    e = n.ent.get("op1")
+    if e is not None and (e.kind & 6 or e.kind == 8):
+        # a computed name (`$$name` / `${$expr}`): op1 is the name
+        # expression itself, not a constant zval
+        return ctx.def_temp(n, "${" + r.ch(r.ex_op1(n)) + "}", i)
     # unresolved name: the rendered op1 (quoted constant / placeholder), or
     # the op2 fallback when op1 is not a zval at all
-    e = n.ent.get("op1")
     fallback = r.ch(r.ex_op1(n)) if e is not None and e.kind == 1 else r.ch(r.ex_op2(n))
     return ctx.def_temp(n, "$GLOBALS[" + fallback + "]", i)
 
@@ -473,6 +477,11 @@ def _bind_global(ctx: LiftContext, i: int, end: int) -> int:
     # the operand is the variable NAME (bare): `global $dtd;` — a CV
     # operand already carries its `$`
     nm = bare(ctx.render.ch(ctx.render.ex_op2(n)))
+    e1 = n.ent.get("op1")
+    if e1 is not None and e1.kind == 8:
+        # bind the CV slot to the global's source name, so later reads of
+        # that slot render `$name` rather than `$CVn`
+        ctx.cv[e1.raw] = nm.lstrip("$")
     ctx.w("global " + (nm if nm.startswith("$") else "$" + nm) + ";")
     ctx.emitted += 1
     return i + 1

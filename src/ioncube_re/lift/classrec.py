@@ -196,6 +196,68 @@ def class_tail(
     return {"props": props, "consts": consts}
 
 
+def scan_prop_table(s: bytes, start: int, end: int) -> list[dict] | None:
+    """Locate a property table when the fixed tail anchors don't parse.
+
+    Some generations put extra metadata between the default table and the
+    property records, so the fixed-offset reader returns None even though
+    the records are present.  Scan for a plausible `[u32 count]` followed
+    by exactly count records of
+    `[u24 namelen][0x20|0x60][name][16 flag/type bytes]`.
+    """
+    best: list[dict] = []
+    for p in range(start, max(start, end - 8)):
+        cnt = int.from_bytes(s[p : p + 4], "little")
+        if not (1 <= cnt <= 64):
+            continue
+        j = p + 4
+        props: list[dict] = []
+        ok = True
+        for _ in range(cnt):
+            if j + 4 > end:
+                ok = False
+                break
+            ln = int.from_bytes(s[j : j + 3], "little")
+            if not (1 <= ln <= 64) or j + 4 + ln + 16 > end:
+                ok = False
+                break
+            if s[j + 3] not in (0x20, 0x60):
+                ok = False
+                break
+            nm = s[j + 4 : j + 4 + ln].decode("latin-1")
+            if not re.fullmatch(r"[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*", nm):
+                ok = False
+                break
+            k = j + 4 + ln
+            vis = s[k]
+            mask = int.from_bytes(s[k + 12 : k + 16], "little")
+            k += 16
+            classname = None
+            if mask & 0x01000000:
+                if k + 4 > end:
+                    ok = False
+                    break
+                ln2 = int.from_bytes(s[k : k + 3], "little")
+                if not (1 <= ln2 <= 128) or k + 4 + ln2 > end:
+                    ok = False
+                    break
+                classname = s[k + 4 : k + 4 + ln2].decode("latin-1")
+                k += 4 + ln2
+            props.append(
+                {
+                    "name": nm,
+                    "vis": vis,
+                    "mask": mask,
+                    "class": classname,
+                    "default": "__nodefault__",
+                }
+            )
+            j = k
+        if ok and len(props) == cnt and len(props) > len(best):
+            best = props
+    return best or None
+
+
 def prop_type(mask: int, classname: str | None) -> str:
     """A zend MAY_BE mask as a PHP type string ('' = untyped)."""
     if classname:
@@ -284,4 +346,4 @@ def promoted_param(p: dict) -> str:
     return f"{vis}{ro} {t}".rstrip()
 
 
-__all__ = ["class_tail", "enum_cases", "promoted_param", "prop_declare", "prop_type"]
+__all__ = ["class_tail", "enum_cases", "promoted_param", "prop_declare", "prop_type", "scan_prop_table"]

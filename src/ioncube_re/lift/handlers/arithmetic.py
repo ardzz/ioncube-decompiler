@@ -43,6 +43,15 @@ _FN1 = {
 def _binop(ctx: LiftContext, i: int, end: int) -> int:
     n = ctx.nodes[i]
     op = ctx.op[i]
+    if op in (16, 18) and i + 1 < end and ctx.op.get(i + 1) in (43, 44, 46, 47):
+        # a switch over strict/loose comparisons arrives as an
+        # IS_IDENTICAL/IS_EQUAL + JMPNZ dispatch chain with no CASE header
+        # and no SWITCH node; reconstruct it from the comparison run.
+        from ..switches import emit_switch
+
+        sw = emit_switch(ctx, i, end, header=False)
+        if sw is not None:
+            return sw
     if op == 15:
         # the match(true) lowering may run [cmp][BOOL_XOR true][JMPNZ] —
         # try the match degradation before the plain xor binop
@@ -115,6 +124,61 @@ def _coalesce(ctx: LiftContext, i: int, end: int) -> int:
         fb = ctx.nodes[e2.raw - 1]
         fe = fb.ent.get("res")
         if fe and fe.kind == 2 and fb.res // 16 == n.res // 16:
+            # `$x = $x ?? fallback` lowers to COALESCE + an ASSIGN of the
+            # fallback to $x just before the QM.  Emit the self-assignment
+            # instead of dropping the write into an unused temp.
+            q = e2.raw - 1
+            prev = ctx.nodes[q - 1] if q > 0 else None
+            e1 = n.ent.get("op1")
+            # `$a[$k] ??= <value>`: the fallback block writes the dim and
+            # yields the written value through the QM_ASSIGN.  Skipping the
+            # block would drop the conditional write (an empty loop body
+            # for `foreach (..) { $a[$k] ??= ''; }`); fold it into a
+            # self-coalescing assignment instead.
+            if (
+                e1 is not None
+                and (e1.kind & 6)
+                and q - 2 >= i
+                and ctx.op.get(q - 2) in (23, 24)
+                and ctx.op.get(q - 1) == 137
+            ):
+                an = ctx.nodes[q - 2]
+                d = ctx.tempDef.get(n.op1 // 16)
+                if d is not None and 0 <= d < i and ctx.op.get(d) in (81, 90):
+                    dn = ctx.nodes[d]
+                    if (
+                        dn.ent.get("op1") is not None
+                        and dn.ent.get("op2") is not None
+                        and dn.op1 == an.op1
+                        and dn.op2 == an.op2
+                    ):
+                        lhs = (
+                            r.ch(r.ex_op1(dn)) + "[" + r.ch(r.ex_op2(dn)) + "]"
+                        )
+                        val = r.ch(r.ex_op1(ctx.nodes[q - 1]))
+                        ctx.line(n)
+                        ctx.w(lhs + " = " + lhs + " ?? " + val + ";")
+                        for k in range(i, q + 1):
+                            ctx.bk(k)
+                        ctx.emitted += 1
+                        return q + 1
+            if (
+                e1 is not None
+                and e1.kind == 8
+                and prev is not None
+                and ctx.op.get(q - 1) == 22
+                and prev.ent.get("op1") is not None
+                and prev.ent["op1"].kind == 8
+                and prev.ent["op1"].raw == e1.raw
+            ):
+                cv = r.ex_op1(n)
+                val = r.assigned_value(prev) or r.ex_op2(prev)
+                ctx.line(n)
+                ctx.w(cv + " = " + cv + " ?? " + r.ch(val) + ";")
+                ctx.bk(q - 1)
+                ctx.bk(q)
+                ctx.emitted += 1
+                return q + 1
             v = r.ch(r.ex_op1(fb))
             if v is not None:
                 ctx.bk(e2.raw - 1)

@@ -170,12 +170,19 @@ def cv_names(
         entries = pool_names(r)
         # the pool layout is [fnName, argNames..., cvNames...] and the
         # header arg-count misses a trailing variadic — take the max
+        # the pool layout is [fnName][docblock?][argNames...][argNames...]
+        # [cvNames...]; skip any non-identifier docblock first, then the
+        # first arg block
         numArgs = max(u32(r["hdr"], 0x14), len(arg_names(r)))
-        base = 1 + numArgs if r["fnrec"] is not None else 0
-        # the pool can carry the component docblock between the function
-        # name/arg block and the CV-name block (one observed method:
-        # [method][docblock][return][formData]...); skip leading
-        # non-identifier entries so the names land on slots 0..N
+        if r["fnrec"] is not None:
+            base = 1
+            while base < len(entries) and not re.match(
+                r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", entries[base]
+            ):
+                base += 1
+            base += numArgs
+        else:
+            base = 0
         while base < len(entries) and not re.match(
             r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", entries[base]
         ):
@@ -185,6 +192,24 @@ def cv_names(
                 r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", entries[base + k]
             ):
                 names[k] = entries[base + k]
+        # the pool can omit local names the descriptor record still carries
+        # (a closure pool `[method, arg, arg]` with rec `[arg, arg, local]`).
+        # Fill only unmapped slots, skipping names already assigned to a
+        # slot (the repeated arg block).
+        if rec_strings:
+            cand = list(rec_strings)
+            cand.pop()
+            cand = [
+                s
+                for s in cand
+                if re.match(r"^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$", s)
+                and not (s[:1].isupper() and s.lower() != s)
+            ]
+            used = set(names.values())
+            rem = [s for s in cand if s not in used]
+            for k in range(numCV):
+                if k not in names and rem:
+                    names[k] = rem.pop(0)
     if not names and rec_strings:
         cand = list(rec_strings)
         cand.pop()  # last = fn name

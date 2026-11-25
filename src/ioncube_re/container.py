@@ -64,6 +64,15 @@ def decrypt_data(data: bytes, path: str = "<data>") -> dict:
     computed = adler17(payload[4:postpbl])
     adler_ok = u32(stored, 0) == computed
 
+    # The adler checkpoint occupies a FIXED 8-byte slot after the raw region
+    # (postpbl .. postpbl+8); the 4 logical bytes are escdec-escaped, so when a
+    # byte is 0xff the escaped form is longer and `adler_end` advances past 4.
+    # The stream_seed / reseed / stream_region that follow are at fixed offsets
+    # from postpbl, NOT from the (variable) adler_end -- anchoring them to
+    # adler_end shifts every subsequent field by one per escaped byte and
+    # desyncs the frame codec. See crypto/escdec.py and the header layout.
+    hdr = postpbl + 8
+
     rol3 = rol3_key(cipher[-16:])
     n = length - 16
     ks = Gen5(seed).bytes(n)
@@ -84,9 +93,9 @@ def decrypt_data(data: bytes, path: str = "<data>") -> dict:
         "adler_computed": computed,
         "adler_ok": adler_ok,
         "adler_end": adler_end,
-        "stream_seed": u32(payload, adler_end + 4),
-        "reseed": u32(payload, adler_end + 8),
-        "stream_region": (adler_end + 12, len(payload)),
+        "stream_seed": u32(payload, hdr),
+        "reseed": u32(payload, hdr + 4),
+        "stream_region": (hdr + 8, len(payload)),
         "md4_fold": fold,
         "ok": adler_ok and fold == 120,
     }
